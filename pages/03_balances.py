@@ -9,6 +9,9 @@ from core.models import CHAINS, format_token
 st.title("Balansen")
 st.caption("Som van alle transacties per token per wallet. Alleen tokens waarvoor 'Importeren' aangevinkt is.")
 
+# Bedragen kleiner dan dit worden als nul beschouwd (float-afrondingsruis)
+ZERO_THRESHOLD = Decimal("0.000001")
+
 
 # ---------------------------------------------------------------------------
 # Data
@@ -24,14 +27,15 @@ def _get_wallets() -> list[dict]:
 
 
 def _get_balances(wallet_id: int | None = None) -> list[dict]:
+    """Fetch raw transaction rows and sum in Python with Decimal for precision."""
     conn = get_connection()
     try:
-        base_sql = """
+        sql = """
             SELECT
-                w.name       AS wallet,
+                w.name  AS wallet,
                 t.chain,
                 t.asset,
-                SUM(CAST(t.amount AS REAL)) AS balance
+                t.amount
             FROM transactions t
             JOIN wallets w ON w.id = t.wallet_id
             JOIN token_review tr
@@ -42,15 +46,23 @@ def _get_balances(wallet_id: int | None = None) -> list[dict]:
         """
         params: list = []
         if wallet_id is not None:
-            base_sql += " AND t.wallet_id = ?"
+            sql += " AND t.wallet_id = ?"
             params.append(wallet_id)
 
-        base_sql += " GROUP BY t.wallet_id, t.chain, t.asset ORDER BY w.name, t.chain, t.asset"
-
-        rows = conn.execute(base_sql, params).fetchall()
-        return [dict(r) for r in rows]
+        rows = conn.execute(sql, params).fetchall()
     finally:
         conn.close()
+
+    # Sum per (wallet, chain, asset) using Decimal
+    totals: dict[tuple, Decimal] = {}
+    for r in rows:
+        key = (r["wallet"], r["chain"], r["asset"])
+        totals[key] = totals.get(key, Decimal("0")) + Decimal(r["amount"])
+
+    return [
+        {"wallet": k[0], "chain": k[1], "asset": k[2], "balance": v}
+        for k, v in sorted(totals.items())
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -63,12 +75,14 @@ if not wallets:
     st.info("Nog geen wallets. Voeg ze toe via **Wallets**.")
     st.stop()
 
-# Wallet filter
+# Filters
+col_sel, col_toggle = st.columns([3, 1])
 options = ["Alle wallets"] + [w["name"] for w in wallets]
-selected_label = st.selectbox("Wallet", options, key="bal_wallet_sel")
+selected_label = col_sel.selectbox("Wallet", options, key="bal_wallet_sel")
 selected_id = None if selected_label == "Alle wallets" else next(
     w["id"] for w in wallets if w["name"] == selected_label
 )
+hide_zero = col_toggle.checkbox("Verberg nullen", value=True, key="hide_zero")
 
 balances = _get_balances(selected_id)
 
@@ -80,35 +94,40 @@ if not balances:
 rows = []
 negatives = 0
 for b in balances:
-    bal = Decimal(str(b["balance"] or "0"))
+    bal = b["balance"]
+    # Treat near-zero as exactly zero (floating-point rounding noise)
+    if abs(bal) < ZERO_THRESHOLD:
+        bal = Decimal("0")
     is_neg = bal < 0
     if is_neg:
         negatives += 1
     rows.append({
-        "":        "⚠️" if is_neg else "",
-        "Wallet":  b["wallet"],
-        "Chain":   CHAINS.get(b["chain"], {}).get("label", b["chain"]),
-        "Token":   b["asset"],
-        "Balans":  format_token(bal),
-        "_neg":    is_neg,
+        "":       "⚠️" if is_neg else "",
+        "Wallet": b["wallet"],
+        "Chain":  CHAINS.get(b["chain"], {}).get("label", b["chain"]),
+        "Token":  b["asset"],
+        "Balans": format_token(bal),
+        "_zero":  bal == 0,
+        "_neg":   is_neg,
     })
+
+if hide_zero:
+    rows = [r for r in rows if not r["_zero"]]
 
 if negatives:
     st.warning(f"{negatives} token(s) met een negatieve balans — er ontbreken waarschijnlijk transacties.")
 
-# Summary metrics
 total_tokens = len(rows)
-positive = total_tokens - negatives
+positive = sum(1 for r in rows if not r["_neg"] and not r["_zero"])
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Tokens", total_tokens)
-c2.metric("Positief", positive)
+c2.metric("Positief saldo", positive)
 c3.metric("⚠️ Negatief", negatives)
 
 st.divider()
 
-# Render table — highlight negatives
-display_df = pd.DataFrame([{k: v for k, v in r.items() if k != "_neg"} for r in rows])
+display_df = pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in rows])
 
 st.dataframe(
     display_df,

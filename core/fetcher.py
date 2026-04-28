@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 
 from core import api
 from core.db import get_connection
-from core.models import CHAINS, TRANSFER_IN, TRANSFER_OUT, GAS_FEE, to_decimal, to_db
+from core.models import CHAINS, WETH_CONTRACTS, TRANSFER_IN, TRANSFER_OUT, GAS_FEE, to_decimal, to_db
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +125,15 @@ def _parse_tokentx_row(raw: dict, wallet: str, chain: str) -> dict | None:
     direction = TRANSFER_IN if to_addr == wallet else TRANSFER_OUT
     signed = abs(amount_raw) if direction == TRANSFER_IN else -abs(amount_raw)
 
+    symbol   = raw.get("tokenSymbol", "").strip()
+    contract = raw.get("contractAddress", "").lower() or None
+
+    # ERC-20 token whose symbol matches the chain's native token (e.g. an "ETH"
+    # vault token on Arbitrum). Keep it separate from native ETH by tagging it
+    # with the first 6 chars of its contract address.
+    if contract and symbol == CHAINS[chain]["native"]:
+        symbol = f"{symbol}-{contract[:6]}"
+
     return {
         "id":               str(uuid.uuid4()),
         "chain":            chain,
@@ -132,8 +141,8 @@ def _parse_tokentx_row(raw: dict, wallet: str, chain: str) -> dict | None:
         "block_number":     int(raw.get("blockNumber", "0") or "0"),
         "tx_hash":          raw.get("hash", ""),
         "type":             direction,
-        "asset":            raw.get("tokenSymbol", "").strip(),
-        "contract_address": raw.get("contractAddress", "").lower() or None,
+        "asset":            symbol,
+        "contract_address": contract,
         "amount":           to_db(signed),
         "source":           "tokentx",
     }
@@ -305,17 +314,29 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
         result.tokens_seen.add(row["asset"])
 
     # 1 — ERC-20 transfers
+    # One transaction can contain multiple Transfer events (e.g. disperseToken).
+    # Etherscan returns each as a separate row with the same tx_hash but no logIndex.
+    # We suffix duplicate hashes (_dup1, _dup2, ...) so each event gets a unique key.
     try:
+        tokentx_hash_counts: dict[str, int] = {}
         for raw in api.fetch_tokentx(addr, chain, startblock):
             parsed = _parse_tokentx_row(raw, addr, chain)
             if parsed:
+                h = parsed["tx_hash"]
+                count = tokentx_hash_counts.get(h, 0)
+                tokentx_hash_counts[h] = count + 1
+                if count > 0:
+                    parsed["tx_hash"] = f"{h}_dup{count}"
                 _add(parsed)
     except Exception:
         pass
 
     # 2 — Native transfers + gas fees
+    # Also collect raw txlist rows for WETH reconciliation in step 4.
+    txlist_rows: list[dict] = []
     try:
         for raw in api.fetch_txlist(addr, chain, startblock):
+            txlist_rows.append(raw)
             for parsed in _parse_txlist_row(raw, addr, chain):
                 _add(parsed)
     except Exception:
@@ -331,6 +352,95 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
                 _add(parsed)
     except Exception:
         pass
+
+    # 4 — Native-wrap reconciliation
+    # Some contracts (WETH and similar) wrap native ETH into an ERC-20 with symbol
+    # "ETH". Etherscan tokentx omits the Transfer(0x0, wallet, amount) mint event.
+    # We detect missing mints by matching txlist deposits (to=contract, value>0)
+    # against TRANSFER_INs in the buffer, and synthesise the missing rows.
+    #
+    # Covers two cases:
+    #   a) Known WETH contracts from WETH_CONTRACTS (symbol "WETH")
+    #   b) Any contract whose tokentx rows had their symbol renamed to "{native}-0x…"
+    #      because it collided with the native token symbol
+
+    native = CHAINS[chain]["native"]
+    wrap_contracts: dict[str, str] = {}  # contract_addr → asset symbol
+
+    weth_addr = WETH_CONTRACTS.get(chain)
+    if weth_addr:
+        wrap_contracts[weth_addr] = "WETH"
+
+    for r in buffer:
+        if r.get("source") == "tokentx" and r.get("contract_address"):
+            sym = r["asset"]
+            if sym.startswith(native + "-"):
+                wrap_contracts[r["contract_address"]] = sym
+
+    for contract_addr, sym in wrap_contracts.items():
+        ins_seen = {
+            r["tx_hash"] for r in buffer
+            if r["asset"] == sym and r["type"] == TRANSFER_IN
+        }
+        for raw in txlist_rows:
+            if raw.get("isError", "0") == "1":
+                continue
+            if raw.get("to", "").lower() != contract_addr:
+                continue
+            value_wei = to_decimal(raw.get("value", "0"))
+            if value_wei <= 0:
+                continue
+            h = raw.get("hash", "")
+            if h in ins_seen or any(k.startswith(h + "_dup") for k in ins_seen):
+                continue
+            amount = value_wei / Decimal("10") ** 18
+            _add({
+                "id":               str(uuid.uuid4()),
+                "chain":            chain,
+                "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
+                "block_number":     int(raw.get("blockNumber", "0") or "0"),
+                "tx_hash":          f"{h}_wrap_{contract_addr[:6]}",
+                "type":             TRANSFER_IN,
+                "asset":            sym,
+                "contract_address": contract_addr,
+                "amount":           to_db(amount),
+                "source":           "txlist",
+            })
+
+    # 4b — Amount-based fallback for ETH-renamed tokens routed via a DEX/router.
+    # When ETH is sent to a router (not directly to the vault), the to-address check
+    # above doesn't fire. These vaults are 1:1 wrappers, so the ETH outflow amount
+    # equals the token deficit exactly. If there's exactly one txlist ETH outflow
+    # matching the deficit and no TRANSFER_IN exists yet, synthesise it.
+    for contract_addr, sym in wrap_contracts.items():
+        if sym == "WETH":
+            continue
+        buf_ins  = [r for r in buffer if r["asset"] == sym and r["type"] == TRANSFER_IN]
+        buf_outs = [r for r in buffer if r["asset"] == sym and r["type"] == TRANSFER_OUT]
+        if not buf_outs or buf_ins:
+            continue
+        deficit = sum(abs(Decimal(r["amount"])) for r in buf_outs)
+        candidates = [
+            raw for raw in txlist_rows
+            if raw.get("isError", "0") != "1"
+            and to_decimal(raw.get("value", "0")) / Decimal("10") ** 18 == deficit
+        ]
+        if len(candidates) != 1:
+            continue
+        raw = candidates[0]
+        h = raw.get("hash", "")
+        _add({
+            "id":               str(uuid.uuid4()),
+            "chain":            chain,
+            "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
+            "block_number":     int(raw.get("blockNumber", "0") or "0"),
+            "tx_hash":          f"{h}_wrap_amt_{contract_addr[:6]}",
+            "type":             TRANSFER_IN,
+            "asset":            sym,
+            "contract_address": contract_addr,
+            "amount":           to_db(deficit),
+            "source":           "txlist",
+        })
 
     # Persist
     result.new_tx = _insert_rows(buffer, wallet_id)
@@ -433,5 +543,126 @@ def accept_all_tokens() -> None:
     try:
         conn.execute("UPDATE token_review SET accepted = 1")
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Scam detection + global token helpers
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_SCAM_RE = _re.compile(
+    r"https?://"
+    r"|www\."
+    r"|\.(com|io|org|net|xyz|site|tech|app|info|live|lat|eu|gg|cc|store|win|wine|cab|ai)\b"
+    r"|t\.ly/|t\s*\.me/|fli\.so/|bio\.link/|wr\.do/"
+    r"|\b(claim|visit|airdrop|voucher|verify|reward|drop|redeem|pacificdrop|access|raffle)\b"
+    r"|^\$"                # starts with dollar sign
+    r"|@[a-zA-Z]"
+    r"|[Ѐ-ӿ]"            # Cyrillisch
+    r"|[԰-֏]"            # Armeens
+    r"|[一-鿿]"            # Chinees
+    r"|[À-ÖØ-ö]{2,}"      # garbled latin
+    r"|[ᴀ-ᶿ]"   # fonetisch/small-caps Unicode (ᴄʟᴀɪᴍ etc.)
+    r"|\[via ",
+    _re.IGNORECASE,
+)
+
+# Tokens die door de regex als scam worden gevangen maar legitiem zijn
+_LEGIT_OVERRIDE: set[str] = {"USD Coin"}
+_CLEAN_TICKER_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9\-_]{0,19}$")
+
+
+def is_scam(asset: str) -> bool:
+    """Return True if the token name matches known scam/spam patterns."""
+    if asset in _LEGIT_OVERRIDE:
+        return False
+    return bool(_SCAM_RE.search(asset))
+
+
+def looks_like_ticker(asset: str) -> bool:
+    """Return True if the name looks like a normal token ticker (no URL/spam)."""
+    return bool(_CLEAN_TICKER_RE.match(asset)) and not is_scam(asset)
+
+
+def get_unique_tokens() -> list[dict]:
+    """
+    Return one row per (chain, asset) combination across all wallets.
+    Includes scam flag and whether any wallet has it accepted.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT
+                tr.chain,
+                tr.asset,
+                MAX(tr.accepted)   AS accepted,
+                COUNT(DISTINCT tr.wallet_id) AS wallet_count
+            FROM token_review tr
+            GROUP BY tr.chain, tr.asset
+            ORDER BY tr.chain, tr.asset
+        """).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def set_token_accepted_global(chain: str, asset: str, accepted: bool) -> None:
+    """Accept or reject a token for ALL wallets that have it."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE token_review SET accepted = ? WHERE chain = ? AND asset = ?",
+            (1 if accepted else 0, chain, asset),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def auto_reject_scams() -> int:
+    """Mark all scam tokens as rejected. Returns number of rows updated."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT chain, asset FROM token_review"
+        ).fetchall()
+        count = 0
+        for r in rows:
+            if is_scam(r["asset"]):
+                cur = conn.execute(
+                    "UPDATE token_review SET accepted = 0 WHERE chain = ? AND asset = ?",
+                    (r["chain"], r["asset"]),
+                )
+                count += cur.rowcount
+        conn.commit()
+        return count
+    finally:
+        conn.close()
+
+
+def accept_non_scams() -> tuple[int, int]:
+    """Accept all non-scam tokens, reject all scam tokens. Returns (accepted, rejected)."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT DISTINCT chain, asset FROM token_review").fetchall()
+        accepted = rejected = 0
+        for r in rows:
+            if is_scam(r["asset"]):
+                conn.execute(
+                    "UPDATE token_review SET accepted = 0 WHERE chain = ? AND asset = ?",
+                    (r["chain"], r["asset"]),
+                )
+                rejected += 1
+            else:
+                conn.execute(
+                    "UPDATE token_review SET accepted = 1 WHERE chain = ? AND asset = ?",
+                    (r["chain"], r["asset"]),
+                )
+                accepted += 1
+        conn.commit()
+        return accepted, rejected
     finally:
         conn.close()

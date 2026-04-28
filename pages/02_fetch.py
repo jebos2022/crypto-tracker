@@ -3,7 +3,10 @@ import pandas as pd
 
 from core.db import get_connection
 from core.models import CHAINS
-from core.fetcher import fetch_all, get_pending_tokens, set_token_accepted, accept_all_tokens
+from core.fetcher import (
+    fetch_all, get_unique_tokens, set_token_accepted_global,
+    accept_all_tokens, auto_reject_scams, accept_non_scams, is_scam, looks_like_ticker,
+)
 
 st.title("Importeren")
 st.caption("Haal on-chain transacties op via de Etherscan en Routescan API.")
@@ -125,57 +128,93 @@ if summary:
 st.divider()
 st.subheader("3. Token review")
 st.caption(
-    "Vink de tokens aan die je wilt importeren. Nieuwe tokens staan standaard **UIT** — "
-    "zo filter je automatisch scam/spam-tokens."
+    "Eén vinkje geldt voor **alle wallets** tegelijk. "
+    "Scam-tokens worden automatisch herkend en verborgen."
 )
 
-token_rows = get_pending_tokens()
+all_tokens = get_unique_tokens()
 
-if not token_rows:
-    total = _inbox_count()
-    if total > 0:
-        st.info(f"Alle {total} transacties staan al ingesteld. Pas eventueel de selectie hieronder aan.")
+if not all_tokens:
+    if _inbox_count() > 0:
+        st.info("Alle tokens zijn al ingesteld.")
     else:
         st.info("Nog geen transacties opgehaald. Klik op 'Haal alle transacties op' hierboven.")
-    token_rows = get_pending_tokens()
+else:
+    # Split scam vs clean
+    clean = [t for t in all_tokens if not is_scam(t["asset"])]
+    scam  = [t for t in all_tokens if is_scam(t["asset"])]
 
-if token_rows:
-    # Build editable dataframe
-    df = pd.DataFrame([{
-        "Wallet":    r["wallet_name"],
-        "Chain":     r["chain"],
-        "Token":     r["asset"],
-        "Importeren": bool(r["accepted"]),
-    } for r in token_rows])
+    # Quick-action buttons
+    c1, c2, c3, c4 = st.columns(4)
 
-    edited = st.data_editor(
-        df,
-        column_config={
-            "Wallet":     st.column_config.TextColumn(disabled=True),
-            "Chain":      st.column_config.TextColumn(disabled=True),
-            "Token":      st.column_config.TextColumn(disabled=True),
-            "Importeren": st.column_config.CheckboxColumn("Importeren"),
-        },
-        hide_index=True,
-        use_container_width=True,
-        key="token_editor",
+    if c1.button("Aanvinken excl. scams", use_container_width=True, key="accept_non_scams_btn", type="primary"):
+        accepted, rejected = accept_non_scams()
+        st.success(f"✅ {accepted} tokens aangevinkt, {rejected} scams afgewezen.")
+        st.rerun()
+
+    if c2.button("Scams afwijzen", use_container_width=True, key="reject_scams_btn"):
+        n = auto_reject_scams()
+        st.success(f"✅ {n} scam-entries afgewezen.")
+        st.rerun()
+
+    if c3.button("Alles aanvinken", use_container_width=True, key="accept_all_btn"):
+        accept_all_tokens()
+        st.success("✅ Alles geselecteerd.")
+        st.rerun()
+
+    if c4.button("Alles uitvinken", use_container_width=True, key="reject_all_btn"):
+        from core.db import get_connection as _gc
+        conn = _gc()
+        conn.execute("UPDATE token_review SET accepted = 0")
+        conn.commit()
+        conn.close()
+        st.success("✅ Alles uitgevinkt.")
+        st.rerun()
+
+    # Stats
+    n_accepted = sum(1 for t in clean if t["accepted"])
+    n_scam_hidden = len(scam)
+    st.caption(
+        f"{n_accepted} van {len(clean)} tokens aangevinkt  ·  "
+        f"{n_scam_hidden} scam-tokens verborgen"
     )
 
-    col_save, col_all = st.columns([2, 1])
+    if not clean:
+        st.info("Geen tokens gevonden na scam-filter.")
+    else:
+        # Build editable table — one row per unique (chain, asset)
+        df = pd.DataFrame([{
+            "Chain":      t["chain"],
+            "Token":      t["asset"],
+            "Wallets":    t["wallet_count"],
+            "Importeren": bool(t["accepted"]),
+        } for t in clean])
 
-    if col_save.button("Selectie opslaan", type="primary", use_container_width=True, key="save_sel_btn"):
-        for i, row in enumerate(token_rows):
-            new_val = bool(edited.iloc[i]["Importeren"])
-            set_token_accepted(row["wallet_id"], row["chain"], row["asset"], new_val)
-        accepted = int(edited["Importeren"].sum())
-        st.success(f"✅ Opgeslagen — {accepted} token(s) geselecteerd.")
-        st.rerun()
+        edited = st.data_editor(
+            df,
+            column_config={
+                "Chain":      st.column_config.TextColumn("Chain",   disabled=True),
+                "Token":      st.column_config.TextColumn("Token",   disabled=True),
+                "Wallets":    st.column_config.NumberColumn("Wallets", disabled=True, width="small"),
+                "Importeren": st.column_config.CheckboxColumn("Importeren"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="token_editor",
+        )
 
-    if col_all.button("Alles selecteren", use_container_width=True, key="accept_all_btn"):
-        accept_all_tokens()
-        st.success("✅ Alle tokens geselecteerd.")
-        st.rerun()
+        if st.button("Selectie opslaan", type="primary", use_container_width=True, key="save_sel_btn"):
+            for i, t in enumerate(clean):
+                new_val = bool(edited.iloc[i]["Importeren"])
+                set_token_accepted_global(t["chain"], t["asset"], new_val)
+            accepted = int(edited["Importeren"].sum())
+            st.success(f"✅ Opgeslagen — {accepted} token(s) geselecteerd.")
+            st.rerun()
 
-    selected_count = int(df["Importeren"].sum())
-    total_count = len(df)
-    st.caption(f"{selected_count} van {total_count} tokens geselecteerd.")
+    if scam:
+        with st.expander(f"Verborgen scam-tokens ({len(scam)})", expanded=False):
+            st.dataframe(
+                pd.DataFrame([{"Chain": t["chain"], "Token": t["asset"]} for t in scam]),
+                hide_index=True,
+                use_container_width=True,
+            )

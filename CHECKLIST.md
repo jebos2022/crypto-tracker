@@ -11,7 +11,7 @@ Dit document bijhouden per sessie. Afvinken = gedaan en getest.
 - [x] uv project + dependencies (streamlit, httpx, python-dotenv)
 - [x] CLAUDE.md + project_spec.md geschreven
 - [x] GitHub repo aangemaakt en gekoppeld
-- [ ] `.env` aanmaken met API keys (`cp .env.example .env`)
+- [x] `.env` aanmaken met API keys (`cp .env.example .env`)
 
 ---
 
@@ -39,7 +39,18 @@ Dit document bijhouden per sessie. Afvinken = gedaan en getest.
 - [ ] Gas fees: tellen mee als negatief in ETH-saldo
 
 ### Bevindingen / openstaande punten
-_Noteer hier wat er nog niet klopt na het testen_
+
+- [ ] **USD Coin backup Polygon −8.779** — backup wallet stuurde 2× 4389,57 USDC naar main
+  (zelfde tx_hash bevestigd), maar de bron van die USDC ontbreekt. Geen enkele TRANSFER_IN
+  voor USD Coin op backup Polygon in de hele geschiedenis. Onderzoeken: bridge-transactie?
+  CEX-storting? Andere wallet niet getrackt? Mogelijk handmatige correctie nodig.
+
+- [ ] **Waardeloze airdrop-tokens verbergen** — tokens die duidelijk niks waard zijn (ooit geairdropped,
+  niet verkochten) moeten makkelijk uit het overzicht gefilterd kunnen worden. Idee: kolom "verborgen"
+  toevoegen aan token_review, of filter op minimale balanswaarde (vereist Fase 2 EUR-prijzen).
+- [ ] **Staked tokens** — tokens die in een protocol gestaked zijn tellen op de balansen-pagina als
+  aanwezig, maar het is niet zichtbaar dat ze niet vrij beschikbaar zijn. Valt samen met Fase 3
+  (transactieclassificatie). Voorlopig acceptabel.
 
 ---
 

@@ -15,6 +15,15 @@ CHAINS: dict[str, dict] = {
 
 ROUTESCAN_CHAINS: set[str] = {"beam"}
 
+# WETH contract addresses per chain — used to detect missing wrap Transfer events
+WETH_CONTRACTS: dict[str, str] = {
+    "ethereum": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "arbitrum": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+    "base":     "0x4200000000000000000000000000000000000006",
+    "optimism": "0x4200000000000000000000000000000000000006",
+    "polygon":  "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619",
+}
+
 ETHERSCAN_BASE = "https://api.etherscan.io/v2/api"
 ROUTESCAN_BASE = "https://api.routescan.io/v2/network/mainnet/evm/{chainid}/etherscan/api"
 PAGE_SIZE = 10_000

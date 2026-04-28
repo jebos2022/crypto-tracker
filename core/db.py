@@ -1,7 +1,9 @@
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "data" / "portfolio.db"
+# Store the DB outside iCloud Drive — iCloud can revert SQLite files on sync.
+# ~/Library/Application Support is the macOS convention for local app data.
+DB_PATH = Path.home() / "Library" / "Application Support" / "crypto-tracker" / "portfolio.db"
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS wallets (
@@ -75,3 +77,15 @@ def reset_db() -> None:
     if DB_PATH.exists():
         DB_PATH.unlink()
     init_db()
+
+
+def clear_transactions() -> None:
+    """Wipe transactions, fetch state, and token review — but keep wallets."""
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM transactions")
+        conn.execute("DELETE FROM wallet_chain_state")
+        conn.execute("DELETE FROM token_review")
+        conn.commit()
+    finally:
+        conn.close()
