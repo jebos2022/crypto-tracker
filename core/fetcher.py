@@ -11,7 +11,12 @@ from decimal import Decimal, InvalidOperation
 
 from core import api
 from core.db import get_connection
-from core.models import CHAINS, WETH_CONTRACTS, TRANSFER_IN, TRANSFER_OUT, GAS_FEE, to_decimal, to_db
+from core.models import (
+    CHAINS, WETH_CONTRACTS,
+    TRANSFER_IN, TRANSFER_OUT, BRIDGE_IN, BRIDGE_OUT, GAS_FEE,
+    is_bridge_contract,
+    to_decimal, to_db,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +127,15 @@ def _parse_tokentx_row(raw: dict, wallet: str, chain: str) -> dict | None:
     except (InvalidOperation, ValueError):
         return None
 
-    direction = TRANSFER_IN if to_addr == wallet else TRANSFER_OUT
-    signed = abs(amount_raw) if direction == TRANSFER_IN else -abs(amount_raw)
+    is_inflow = (to_addr == wallet)
+    counterparty = from_addr if is_inflow else to_addr
+    bridge_name = is_bridge_contract(chain, counterparty)
+
+    if bridge_name:
+        direction = BRIDGE_IN if is_inflow else BRIDGE_OUT
+    else:
+        direction = TRANSFER_IN if is_inflow else TRANSFER_OUT
+    signed = abs(amount_raw) if is_inflow else -abs(amount_raw)
 
     symbol   = raw.get("tokenSymbol", "").strip()
     contract = raw.get("contractAddress", "").lower() or None
@@ -164,9 +176,14 @@ def _parse_txlist_row(raw: dict, wallet: str, chain: str) -> list[dict]:
     if not is_error:
         value_wei = to_decimal(raw.get("value", "0"))
         if value_wei > 0 and (from_addr == wallet or to_addr == wallet):
-            direction = TRANSFER_IN if to_addr == wallet else TRANSFER_OUT
+            is_inflow = (to_addr == wallet)
+            counterparty = from_addr if is_inflow else to_addr
+            if is_bridge_contract(chain, counterparty):
+                direction = BRIDGE_IN if is_inflow else BRIDGE_OUT
+            else:
+                direction = TRANSFER_IN if is_inflow else TRANSFER_OUT
             amount_eth = value_wei / Decimal("10") ** 18
-            signed = abs(amount_eth) if direction == TRANSFER_IN else -abs(amount_eth)
+            signed = abs(amount_eth) if is_inflow else -abs(amount_eth)
             rows.append({
                 "id":               str(uuid.uuid4()),
                 "chain":            chain,
@@ -218,9 +235,14 @@ def _parse_internal_row(raw: dict, wallet: str, chain: str, idx: int) -> dict | 
         return None
 
     native = CHAINS[chain]["native"]
-    direction = TRANSFER_IN if to_addr == wallet else TRANSFER_OUT
+    is_inflow = (to_addr == wallet)
+    counterparty = from_addr if is_inflow else to_addr
+    if is_bridge_contract(chain, counterparty):
+        direction = BRIDGE_IN if is_inflow else BRIDGE_OUT
+    else:
+        direction = TRANSFER_IN if is_inflow else TRANSFER_OUT
     amount = value_wei / Decimal("10") ** 18
-    signed = abs(amount) if direction == TRANSFER_IN else -abs(amount)
+    signed = abs(amount) if is_inflow else -abs(amount)
     outer_hash = raw.get("hash", "")
 
     return {
