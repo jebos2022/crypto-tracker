@@ -3,9 +3,12 @@ import pandas as pd
 
 from core.db import get_connection
 from core.models import CHAINS
-from core.fetcher import (
-    fetch_all, get_unique_tokens, set_token_accepted_global,
-    accept_all_tokens, auto_reject_scams, accept_non_scams, is_scam, looks_like_ticker,
+from core.fetcher import fetch_all
+from core.token_review import (
+    get_unique_tokens, set_token_accepted_global,
+    accept_all_tokens, auto_reject_scams, accept_non_scams,
+    is_scam, is_suspicious_by_metadata, looks_like_ticker,
+    enrich_tokens, count_enrichable_contracts,
 )
 
 st.title("Importeren")
@@ -140,16 +143,37 @@ if not all_tokens:
     else:
         st.info("Nog geen transacties opgehaald. Klik op 'Haal alle transacties op' hierboven.")
 else:
-    # Split scam vs clean
-    clean = [t for t in all_tokens if not is_scam(t["asset"])]
-    scam  = [t for t in all_tokens if is_scam(t["asset"])]
+    # Verrijken via Etherscan tokeninfo
+    n_contracts = count_enrichable_contracts()
+    n_enriched = sum(1 for t in all_tokens if t.get("has_metadata"))
+    enrich_col, enrich_status = st.columns([2, 3])
+    if enrich_col.button(
+        f"Metadata ophalen ({n_contracts} tokens)",
+        key="enrich_btn",
+        use_container_width=True,
+        help="Haalt verificatie, houders en social info op via Etherscan. Duurt ~30 sec.",
+    ):
+        prog = st.progress(0, text="Metadata ophalen…")
+        enriched, failed = enrich_tokens(
+            progress_fn=lambda f, t: prog.progress(min(f, 0.99), text=t)
+        )
+        prog.progress(1.0, text="Klaar")
+        st.success(f"✅ {enriched} tokens verrijkt, {failed} niet beschikbaar.")
+        st.rerun()
+    if n_enriched:
+        enrich_status.caption(f"{n_enriched} van {n_contracts} tokens hebben metadata.")
+
+    # Split tokens into three groups
+    regex_scam = [t for t in all_tokens if is_scam(t["asset"])]
+    meta_susp   = [t for t in all_tokens if not is_scam(t["asset"]) and is_suspicious_by_metadata(t)]
+    clean       = [t for t in all_tokens if not is_scam(t["asset"]) and not is_suspicious_by_metadata(t)]
 
     # Quick-action buttons
     c1, c2, c3, c4 = st.columns(4)
 
     if c1.button("Aanvinken excl. scams", use_container_width=True, key="accept_non_scams_btn", type="primary"):
         accepted, rejected = accept_non_scams()
-        st.success(f"✅ {accepted} tokens aangevinkt, {rejected} scams afgewezen.")
+        st.success(f"✅ {accepted} tokens aangevinkt, {rejected} afgewezen.")
         st.rerun()
 
     if c2.button("Scams afwijzen", use_container_width=True, key="reject_scams_btn"):
@@ -173,19 +197,20 @@ else:
 
     # Stats
     n_accepted = sum(1 for t in clean if t["accepted"])
-    n_scam_hidden = len(scam)
     st.caption(
         f"{n_accepted} van {len(clean)} tokens aangevinkt  ·  "
-        f"{n_scam_hidden} scam-tokens verborgen"
+        f"{len(regex_scam)} scam (regex)  ·  "
+        f"{len(meta_susp)} verdacht (metadata)"
     )
 
     if not clean:
-        st.info("Geen tokens gevonden na scam-filter.")
+        st.info("Geen tokens gevonden na filters.")
     else:
-        # Build editable table — one row per unique (chain, asset)
         df = pd.DataFrame([{
+            "✅":         "✅" if t.get("verified") else "",
             "Chain":      t["chain"],
             "Token":      t["asset"],
+            "Houders":    t["holder_count"] if t.get("holder_count") is not None else "—",
             "Wallets":    t["wallet_count"],
             "Importeren": bool(t["accepted"]),
         } for t in clean])
@@ -193,8 +218,10 @@ else:
         edited = st.data_editor(
             df,
             column_config={
+                "✅":         st.column_config.TextColumn("", width="small", disabled=True),
                 "Chain":      st.column_config.TextColumn("Chain",   disabled=True),
                 "Token":      st.column_config.TextColumn("Token",   disabled=True),
+                "Houders":    st.column_config.TextColumn("Houders", disabled=True, width="small"),
                 "Wallets":    st.column_config.NumberColumn("Wallets", disabled=True, width="small"),
                 "Importeren": st.column_config.CheckboxColumn("Importeren"),
             },
@@ -211,10 +238,37 @@ else:
             st.success(f"✅ Opgeslagen — {accepted} token(s) geselecteerd.")
             st.rerun()
 
-    if scam:
-        with st.expander(f"Verborgen scam-tokens ({len(scam)})", expanded=False):
+    if meta_susp:
+        with st.expander(f"Verdachte tokens — geen verificatie of social ({len(meta_susp)})", expanded=False):
+            st.caption("Deze tokens hebben metadata maar geen Etherscan-verificatie, website of social media.")
+            susp_df = pd.DataFrame([{
+                "Chain":    t["chain"],
+                "Token":    t["asset"],
+                "Houders":  t["holder_count"] if t.get("holder_count") is not None else "—",
+                "Importeren": bool(t["accepted"]),
+            } for t in meta_susp])
+            edited_susp = st.data_editor(
+                susp_df,
+                column_config={
+                    "Chain":   st.column_config.TextColumn("Chain",  disabled=True),
+                    "Token":   st.column_config.TextColumn("Token",  disabled=True),
+                    "Houders": st.column_config.TextColumn("Houders", disabled=True, width="small"),
+                    "Importeren": st.column_config.CheckboxColumn("Importeren"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                key="susp_editor",
+            )
+            if st.button("Verdachte selectie opslaan", key="save_susp_btn"):
+                for i, t in enumerate(meta_susp):
+                    set_token_accepted_global(t["chain"], t["asset"], bool(edited_susp.iloc[i]["Importeren"]))
+                st.success("✅ Opgeslagen.")
+                st.rerun()
+
+    if regex_scam:
+        with st.expander(f"Verborgen scam-tokens — regex ({len(regex_scam)})", expanded=False):
             st.dataframe(
-                pd.DataFrame([{"Chain": t["chain"], "Token": t["asset"]} for t in scam]),
+                pd.DataFrame([{"Chain": t["chain"], "Token": t["asset"]} for t in regex_scam]),
                 hide_index=True,
                 use_container_width=True,
             )

@@ -18,39 +18,40 @@ Dit document bijhouden per sessie. Afvinken = gedaan en getest.
 ## Fase 1 — MVP: On-chain import
 
 ### Bouwen
-- [x] `core/db.py` — schema (wallets, transactions, token_review, wallet_chain_state)
+- [x] `core/db.py` — schema (wallets, transactions, token_review, wallet_chain_state, token_metadata)
 - [x] `core/models.py` — CHAINS dict, Decimal helpers
-- [x] `core/api.py` — HTTP-laag (tokentx, txlist, txlistinternal)
+- [x] `core/api.py` — HTTP-laag (tokentx, txlist, txlistinternal, **tokeninfo**)
 - [x] `core/fetcher.py` — fetch pipeline, dedup op (tx_hash, wallet_id)
+- [x] `core/token_review.py` — scam detectie (regex + metadata), tokeninfo enrichment, accept/reject helpers
 - [x] `core/backup.py` — automatische backups
 - [x] `pages/01_wallets.py` — wallet management
-- [x] `pages/02_fetch.py` — fetch + opt-in token review
+- [x] `pages/02_fetch.py` — fetch + opt-in token review + metadata verrijken
 - [x] `pages/03_balances.py` — balansen per token per wallet
 
 ### Testen
-- [ ] App opstarten: `uv run streamlit run app.py`
-- [ ] Wallet toevoegen via pagina 01
-- [ ] Transacties ophalen (start met 1 wallet, 1 chain)
-- [ ] Token review: nieuwe tokens staan standaard UIT
-- [ ] Token aanvinken → saldo zichtbaar op balansen-pagina
+- [x] App opstarten: `uv run streamlit run app.py`
+- [x] Wallet toevoegen via pagina 01
+- [x] Transacties ophalen (alle wallets, alle chains)
+- [x] Token review: nieuwe tokens staan standaard UIT
+- [x] Token aanvinken → saldo zichtbaar op balansen-pagina
 - [ ] ETH-saldo vergelijken met Etherscan website (spot-check)
-- [ ] Tweede fetch → geen dubbele transacties (incrementeel)
-- [ ] Inter-wallet transfer: outflow bij wallet A én inflow bij wallet B zichtbaar
-- [ ] Gas fees: tellen mee als negatief in ETH-saldo
+- [x] Tweede fetch → geen dubbele transacties (incrementeel)
+- [x] Inter-wallet transfer: outflow bij wallet A én inflow bij wallet B zichtbaar
+- [x] Gas fees: tellen mee als negatief in ETH-saldo
+- [x] Negatieve saldi: nul echte negatieve saldi na token review
 
-### Bevindingen / openstaande punten
+### Bevindingen / opgeloste punten
 
-- [ ] **USD Coin backup Polygon −8.779** — backup wallet stuurde 2× 4389,57 USDC naar main
-  (zelfde tx_hash bevestigd), maar de bron van die USDC ontbreekt. Geen enkele TRANSFER_IN
-  voor USD Coin op backup Polygon in de hele geschiedenis. Onderzoeken: bridge-transactie?
-  CEX-storting? Andere wallet niet getrackt? Mogelijk handmatige correctie nodig.
+- [x] **USD Coin backup Polygon −8.779** — OPGELOST. Nep-token: contract `0xe079490a...`
+  is geen officieel USDC-contract op Polygon. Scam drain-token — uitgevinkt in token review.
+  Nul negatieve saldi na fix.
 
-- [ ] **Waardeloze airdrop-tokens verbergen** — tokens die duidelijk niks waard zijn (ooit geairdropped,
-  niet verkochten) moeten makkelijk uit het overzicht gefilterd kunnen worden. Idee: kolom "verborgen"
-  toevoegen aan token_review, of filter op minimale balanswaarde (vereist Fase 2 EUR-prijzen).
-- [ ] **Staked tokens** — tokens die in een protocol gestaked zijn tellen op de balansen-pagina als
-  aanwezig, maar het is niet zichtbaar dat ze niet vrij beschikbaar zijn. Valt samen met Fase 3
-  (transactieclassificatie). Voorlopig acceptabel.
+- [x] **Waardeloze airdrop-tokens verbergen** — OPGELOST via Etherscan tokeninfo metadata:
+  tokens zonder verificatie, website én social media worden als "verdacht" geflagd en
+  gescheiden van de clean token lijst. "Aanvinken excl. scams" sluit ook verdachte tokens uit.
+
+- [ ] **Staked tokens** — tokens in een protocol gestaked tellen als aanwezig in balansen
+  maar zijn niet vrij beschikbaar. Valt onder Fase 3 (transactieclassificatie). Volgende stap.
 
 ---
 

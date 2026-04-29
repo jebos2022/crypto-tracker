@@ -55,6 +55,18 @@ CREATE TABLE IF NOT EXISTS token_meta (
     last_seen        TEXT,
     PRIMARY KEY (chain, contract_address)
 );
+
+-- token_metadata: Etherscan tokeninfo enrichment (verification, holders, social presence).
+CREATE TABLE IF NOT EXISTS token_metadata (
+    contract_address TEXT    NOT NULL,
+    chain            TEXT    NOT NULL,
+    verified         INTEGER NOT NULL DEFAULT 0,
+    holder_count     INTEGER,
+    has_website      INTEGER NOT NULL DEFAULT 0,
+    has_social       INTEGER NOT NULL DEFAULT 0,
+    fetched_at       TEXT    NOT NULL,
+    PRIMARY KEY (contract_address, chain)
+);
 """
 
 INDICES_SQL = """

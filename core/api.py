@@ -227,6 +227,27 @@ def fetch_txlist(address: str, chain: str, startblock: int = 0) -> list[dict]:
     )
 
 
+def fetch_tokeninfo(contract_address: str, chain: str) -> dict | None:
+    """Token metadata: verification, holder count, social presence. Etherscan V2 only."""
+    if chain in ROUTESCAN_CHAINS:
+        return None
+    url = _api_url(chain)
+    base = _api_params(chain)
+    with httpx.Client(timeout=30) as client:
+        resp = client.get(url, params={
+            **base,
+            "module": "token",
+            "action": "tokeninfo",
+            "contractaddress": contract_address.lower(),
+        })
+        resp.raise_for_status()
+        data = resp.json()
+    if data.get("status") != "1":
+        return None
+    result = data.get("result") or []
+    return result[0] if isinstance(result, list) else result
+
+
 def fetch_txlistinternal(address: str, chain: str, startblock: int = 0) -> list[dict]:
     """Native token movements via smart contracts (DEX returns, unstaking)."""
     return _paginate(
