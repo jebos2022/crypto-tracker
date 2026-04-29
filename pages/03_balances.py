@@ -5,6 +5,7 @@ import pandas as pd
 
 from core.db import get_connection
 from core.models import CHAINS, format_token, BRIDGE_OUT, BRIDGE_IN
+from core.balance_check import verify_balances
 
 st.title("Balansen")
 st.caption("Som van alle transacties per token per wallet. Alleen tokens waarvoor 'Importeren' aangevinkt is.")
@@ -206,6 +207,95 @@ if negatives:
         "Voeg de bestemmings-chain toe aan de import om de inkomende kant ook te zien.  \n"
         "⚠️ = negatief om een andere reden — waarschijnlijk ontbrekende transacties "
         "(CEX-transfers, niet-geïmporteerde chains, of nog onbekende bridge-contracten)."
+    )
+
+# ---------------------------------------------------------------------------
+# On-chain verificatie — vergelijk computed saldi met `tokenbalance`/`balance`
+# ---------------------------------------------------------------------------
+st.divider()
+st.subheader("On-chain verificatie")
+st.caption(
+    "Vergelijkt je gereconstrueerde saldi met de live balans op de chain. "
+    "Een verschil (∆) duidt vaak op rebasing tokens (stETH, AMPL), fee-on-transfer, "
+    "of ontbrekende transacties. Eén API-call per token — dus bij veel tokens "
+    "duurt het even (≈5 calls/sec free tier)."
+)
+
+verify_clicked = st.button("Verifieer tegen on-chain", key="verify_btn")
+
+if verify_clicked:
+    progress = st.progress(0, text="Bezig...")
+    try:
+        check_rows = verify_balances(
+            wallet_id=selected_id,
+            progress_fn=lambda f, t: progress.progress(min(f, 0.99), text=t),
+        )
+        progress.progress(1.0, text="Klaar")
+        st.session_state["balance_check"] = check_rows
+    except Exception as e:
+        progress.empty()
+        st.error(f"Verificatie mislukt: {e}")
+
+check_rows = st.session_state.get("balance_check")
+if check_rows:
+    # Filter to currently selected wallet (session_state may hold a previous run)
+    if selected_id is not None:
+        sel_name = next(w["name"] for w in wallets if w["id"] == selected_id)
+        visible = [r for r in check_rows if r.wallet == sel_name]
+    else:
+        visible = list(check_rows)
+
+    mismatches = 0
+    errors_n = 0
+    unknown_dec = 0
+    check_table = []
+    for r in visible:
+        if r.error:
+            errors_n += 1
+            delta_str = "—"
+            onchain_str = "—"
+            symbol = "❌"
+        elif not r.decimals_known:
+            unknown_dec += 1
+            delta_str = "(decimals onbekend — re-fetch)"
+            onchain_str = format_token(r.onchain, decimals=0)
+            symbol = "❓"
+        else:
+            d = r.delta or Decimal("0")
+            if abs(d) < ZERO_THRESHOLD:
+                symbol = "✅"
+                delta_str = format_token(Decimal("0"))
+            else:
+                symbol = "⚠️"
+                mismatches += 1
+                delta_str = format_token(d)
+            onchain_str = format_token(r.onchain)
+
+        check_table.append({
+            "":         symbol,
+            "Wallet":   r.wallet,
+            "Chain":    CHAINS.get(r.chain, {}).get("label", r.chain),
+            "Token":    r.asset,
+            "Computed": format_token(r.computed),
+            "On-chain": onchain_str,
+            "∆":        delta_str,
+            "Detail":   r.error or "",
+        })
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("✅ Match", len(visible) - mismatches - errors_n - unknown_dec)
+    c2.metric("⚠️ Verschil", mismatches)
+    c3.metric("❌ Fout / ❓ onbekend", errors_n + unknown_dec)
+
+    st.dataframe(
+        pd.DataFrame(check_table),
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.caption(
+        "✅ = saldo klopt  ·  ⚠️ = verschil tussen reconstructie en on-chain  ·  "
+        "❓ = decimals nog onbekend (re-fetch om te populeren)  ·  "
+        "❌ = API-call mislukt (zie Detail)"
     )
 
 # Bridge activity expander — shows all wallets/chains/assets with bridge activity

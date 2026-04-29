@@ -318,6 +318,32 @@ def _upsert_token_review(wallet_id: int, chain: str, asset: str, contract_addres
         conn.close()
 
 
+def _upsert_token_meta(chain: str, contract_address: str, symbol: str, decimals: int) -> None:
+    """
+    Persist per-contract decimals + symbol from raw tokentx rows. Idempotent
+    upsert — used later by balance_check to scale on-chain balances.
+    """
+    if not contract_address:
+        return
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO token_meta (chain, contract_address, symbol, decimals, last_seen)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chain, contract_address) DO UPDATE SET
+                symbol    = excluded.symbol,
+                decimals  = excluded.decimals,
+                last_seen = excluded.last_seen
+            """,
+            (chain, contract_address.lower(), symbol, decimals, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Core fetch logic
 # ---------------------------------------------------------------------------
@@ -361,6 +387,8 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
     # We suffix duplicate hashes (_dup1, _dup2, ...) so each event gets a unique key.
     try:
         tokentx_hash_counts: dict[str, int] = {}
+        # Buffer token-meta upserts to avoid hammering the DB inside the loop.
+        meta_seen: dict[str, tuple[str, int]] = {}  # contract -> (symbol, decimals)
         for raw in api.fetch_tokentx(addr, chain, startblocks["tokentx"]):
             parsed = _parse_tokentx_row(raw, addr, chain)
             if parsed:
@@ -370,6 +398,16 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
                 if count > 0:
                     parsed["tx_hash"] = f"{h}_dup{count}"
                 _add(parsed, "tokentx")
+                # Capture decimals + symbol for balance verification later.
+                contract = parsed.get("contract_address")
+                if contract and contract not in meta_seen:
+                    try:
+                        decimals = int(raw.get("tokenDecimal", "18") or "18")
+                    except (ValueError, TypeError):
+                        decimals = 18
+                    meta_seen[contract] = (raw.get("tokenSymbol", "").strip(), decimals)
+        for contract, (sym, dec) in meta_seen.items():
+            _upsert_token_meta(chain, contract, sym, dec)
     except Exception as e:
         result.endpoint_errors["tokentx"] = f"{type(e).__name__}: {e}"
 
