@@ -1,6 +1,25 @@
 """
 HTTP layer — paginated Etherscan V2 / Routescan API calls.
 No DB access, no parsing, no UUIDs. Returns raw API dicts.
+
+Pagination strategy
+-------------------
+Etherscan caps any single query at 10.000 records — incrementing `page`
+beyond that returns nothing. We work in *block windows* instead: keep
+`offset=10_000`, advance `startblock` past the highest block we just saw,
+and repeat until a partial batch comes back. This handles wallets with
+arbitrarily many transfers correctly.
+
+Status handling
+---------------
+Etherscan signals different conditions all with `status="0"`:
+  * "No transactions found"           — finished, return what we have
+  * "NOTOK" + "Max rate limit reached" — sleep and retry
+  * "NOTOK" + something else           — real error, raise EtherscanError
+
+The previous version treated every `status != "1"` as "done" and silently
+truncated the result on rate limits, leaving `last_block` advanced as if
+the data were complete. That's the bug class this module exists to fix.
 """
 
 import os
@@ -10,6 +29,32 @@ import httpx
 
 from core.models import CHAINS, ROUTESCAN_CHAINS, ETHERSCAN_BASE, ROUTESCAN_BASE, PAGE_SIZE
 
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+class EtherscanError(Exception):
+    """Raised on a real API error (bad params, server fault, exhausted retries)."""
+
+
+class EtherscanRateLimit(EtherscanError):
+    """Raised after MAX_RETRIES rate-limit responses on the same call."""
+
+
+# ---------------------------------------------------------------------------
+# Tunables
+# ---------------------------------------------------------------------------
+
+MAX_RETRIES = 5            # rate-limit retries per request
+INITIAL_BACKOFF = 1.0      # seconds; doubles per retry (1, 2, 4, 8, 16)
+INTER_PAGE_DELAY = 0.25    # seconds between successful pages, throttle to <5 req/s
+DEFAULT_TIMEOUT = 30.0
+
+
+# ---------------------------------------------------------------------------
+# URL / param helpers
+# ---------------------------------------------------------------------------
 
 def _api_url(chain: str) -> str:
     if chain in ROUTESCAN_CHAINS:
@@ -29,67 +74,168 @@ def _api_params(chain: str) -> dict:
     return {"chainid": CHAINS[chain]["chainid"], "apikey": key}
 
 
-def _paginate(url: str, base_params: dict, action_params: dict) -> list[dict]:
-    """Fetch all pages for a given action. Returns combined result list."""
+# ---------------------------------------------------------------------------
+# Response classification
+# ---------------------------------------------------------------------------
+
+def _is_rate_limit(message: str, result) -> bool:
+    """Heuristic: Etherscan's rate-limit responses are inconsistent."""
+    haystack = f"{message} {result}".lower()
+    return any(s in haystack for s in (
+        "rate limit",
+        "max calls per sec",
+        "too many",
+    ))
+
+
+def _classify(data: dict) -> tuple[str, list]:
+    """
+    Inspect a parsed JSON response.
+
+    Returns ("ok", batch)              — success, `batch` is a list (possibly empty)
+    Returns ("empty", [])               — "No transactions found", finished
+    Raises EtherscanRateLimit           — caller should sleep and retry
+    Raises EtherscanError               — non-recoverable
+    """
+    status  = data.get("status")
+    message = data.get("message", "")
+    result  = data.get("result")
+
+    if status == "1":
+        return "ok", result if isinstance(result, list) else []
+
+    # status == "0"
+    if isinstance(result, list):
+        # "No transactions found" — finished, no more pages.
+        return "empty", []
+
+    # result is a string error message at this point
+    if _is_rate_limit(message, result):
+        raise EtherscanRateLimit(f"{message}: {result}")
+
+    raise EtherscanError(f"{message}: {result}")
+
+
+# ---------------------------------------------------------------------------
+# Paginated fetch
+# ---------------------------------------------------------------------------
+
+def _request_with_retry(client: httpx.Client, url: str, params: dict) -> tuple[str, list]:
+    """One HTTP request, with rate-limit retries. Returns (status, batch)."""
+    backoff = INITIAL_BACKOFF
+    for attempt in range(MAX_RETRIES):
+        resp = client.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        try:
+            return _classify(data)
+        except EtherscanRateLimit:
+            if attempt == MAX_RETRIES - 1:
+                raise
+            time.sleep(backoff)
+            backoff *= 2
+    # Unreachable, but keeps type-checkers happy.
+    raise EtherscanRateLimit("exhausted retries")
+
+
+def _paginate(
+    url: str,
+    base_params: dict,
+    action_params: dict,
+    *,
+    startblock: int = 0,
+    endblock: int = 99_999_999,
+) -> list[dict]:
+    """
+    Fetch all rows for `action_params` between `startblock` and `endblock`,
+    advancing the window past Etherscan's 10k-record query cap.
+    """
     results: list[dict] = []
-    page = 1
-    with httpx.Client(timeout=30) as client:
+    cur_start = startblock
+
+    with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
         while True:
             params = {
                 **base_params,
                 **action_params,
-                "page": page,
-                "offset": PAGE_SIZE,
-                "sort": "asc",
+                "startblock": cur_start,
+                "endblock":   endblock,
+                "page":       1,
+                "offset":     PAGE_SIZE,
+                "sort":       "asc",
             }
-            resp = client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("status") != "1":
+            kind, batch = _request_with_retry(client, url, params)
+
+            if kind == "empty" or not batch:
                 break
-            batch = data["result"]
+
             results.extend(batch)
+
+            # Partial batch → reached the end of available data.
             if len(batch) < PAGE_SIZE:
                 break
-            page += 1
-            time.sleep(0.25)
+
+            # Full batch → likely more data past the 10k window cap.
+            # Advance startblock past the highest block we just saw.
+            try:
+                last_block = max(int(r.get("blockNumber", "0") or "0") for r in batch)
+            except ValueError:
+                # Unexpected non-integer blockNumber; bail to avoid infinite loop.
+                break
+
+            next_start = last_block + 1
+            if next_start <= cur_start:
+                # Defensive: would loop forever (>=10k records in a single block,
+                # virtually impossible for one wallet but cheap to guard against).
+                break
+            cur_start = next_start
+
+            time.sleep(INTER_PAGE_DELAY)
+
     return results
 
 
+# ---------------------------------------------------------------------------
+# Endpoint wrappers
+# ---------------------------------------------------------------------------
+
 def fetch_tokentx(address: str, chain: str, startblock: int = 0) -> list[dict]:
     """ERC-20 token transfers for a wallet address."""
-    url = _api_url(chain)
-    base = _api_params(chain)
-    return _paginate(url, base, {
-        "module": "account",
-        "action": "tokentx",
-        "address": address.lower(),
-        "startblock": startblock,
-        "endblock": 99_999_999,
-    })
+    return _paginate(
+        _api_url(chain),
+        _api_params(chain),
+        {
+            "module":  "account",
+            "action":  "tokentx",
+            "address": address.lower(),
+        },
+        startblock=startblock,
+    )
 
 
 def fetch_txlist(address: str, chain: str, startblock: int = 0) -> list[dict]:
     """Native token direct transactions (includes gas data)."""
-    url = _api_url(chain)
-    base = _api_params(chain)
-    return _paginate(url, base, {
-        "module": "account",
-        "action": "txlist",
-        "address": address.lower(),
-        "startblock": startblock,
-        "endblock": 99_999_999,
-    })
+    return _paginate(
+        _api_url(chain),
+        _api_params(chain),
+        {
+            "module":  "account",
+            "action":  "txlist",
+            "address": address.lower(),
+        },
+        startblock=startblock,
+    )
 
 
 def fetch_txlistinternal(address: str, chain: str, startblock: int = 0) -> list[dict]:
     """Native token movements via smart contracts (DEX returns, unstaking)."""
-    url = _api_url(chain)
-    base = _api_params(chain)
-    return _paginate(url, base, {
-        "module": "account",
-        "action": "txlistinternal",
-        "address": address.lower(),
-        "startblock": startblock,
-        "endblock": 99_999_999,
-    })
+    return _paginate(
+        _api_url(chain),
+        _api_params(chain),
+        {
+            "module":  "account",
+            "action":  "txlistinternal",
+            "address": address.lower(),
+        },
+        startblock=startblock,
+    )
