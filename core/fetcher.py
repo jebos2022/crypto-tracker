@@ -29,8 +29,12 @@ class FetchResult:
     chain: str
     new_tx: int = 0
     skipped: int = 0
-    max_block: int = 0
+    # Highest block per endpoint that we successfully fetched.
+    # If an endpoint errored we leave it unset so its `last_block` does NOT
+    # get advanced — the next fetch will retry from where we stopped.
+    max_block_per_endpoint: dict[str, int] = field(default_factory=dict)
     tokens_seen: set[str] = field(default_factory=set)
+    endpoint_errors: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -58,31 +62,38 @@ class FetchSummary:
 # Incremental state helpers
 # ---------------------------------------------------------------------------
 
-def _get_last_block(wallet_id: int, chain: str) -> int:
+def _get_last_block(wallet_id: int, chain: str, endpoint: str) -> int:
+    """
+    Highest block already fetched for (wallet, chain, endpoint).
+
+    Each of `tokentx` / `txlist` / `txlistinternal` is tracked independently
+    so a transient failure in one doesn't poison the others' incremental state.
+    """
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT last_block FROM wallet_chain_state WHERE wallet_id = ? AND chain = ?",
-            (wallet_id, chain),
+            "SELECT last_block FROM wallet_chain_state "
+            "WHERE wallet_id = ? AND chain = ? AND endpoint = ?",
+            (wallet_id, chain, endpoint),
         ).fetchone()
         return row["last_block"] if row else 0
     finally:
         conn.close()
 
 
-def _save_last_block(wallet_id: int, chain: str, last_block: int) -> None:
+def _save_last_block(wallet_id: int, chain: str, endpoint: str, last_block: int) -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     conn = get_connection()
     try:
         conn.execute(
             """
-            INSERT INTO wallet_chain_state (wallet_id, chain, last_block, last_fetched)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(wallet_id, chain) DO UPDATE SET
+            INSERT INTO wallet_chain_state (wallet_id, chain, endpoint, last_block, last_fetched)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(wallet_id, chain, endpoint) DO UPDATE SET
                 last_block   = MAX(wallet_chain_state.last_block, excluded.last_block),
                 last_fetched = excluded.last_fetched
             """,
-            (wallet_id, chain, last_block, now),
+            (wallet_id, chain, endpoint, last_block, now),
         )
         conn.commit()
     finally:
@@ -312,28 +323,37 @@ def _upsert_token_review(wallet_id: int, chain: str, asset: str, contract_addres
 # ---------------------------------------------------------------------------
 
 def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
-    """Fetch all 3 endpoints for one wallet+chain. Returns FetchResult."""
+    """
+    Fetch all 3 endpoints for one wallet+chain. Returns FetchResult.
+
+    Each endpoint is fetched independently with its own `last_block` cursor.
+    If one endpoint errors, its cursor is NOT advanced — the next fetch will
+    retry the same range. The other endpoints still progress normally.
+    """
     addr = address.lower().strip()
     result = FetchResult(wallet_id=wallet_id, chain=chain)
-
-    last_block = _get_last_block(wallet_id, chain)
-    startblock = last_block + 1 if last_block > 0 else 0
     known = _known_hashes(wallet_id)
 
     buffer: list[dict] = []
 
-    def _add(row: dict) -> None:
+    def _add(row: dict, endpoint: str) -> None:
         h = row.get("tx_hash", "")
         if h and h in known:
             result.skipped += 1
             return
         bn = row.get("block_number", 0)
-        if bn > result.max_block:
-            result.max_block = bn
+        prev = result.max_block_per_endpoint.get(endpoint, 0)
+        if bn > prev:
+            result.max_block_per_endpoint[endpoint] = bn
         buffer.append(row)
         if h:
             known.add(h)
         result.tokens_seen.add(row["asset"])
+
+    # Per-endpoint startblock — independent cursors.
+    last_blocks = {ep: _get_last_block(wallet_id, chain, ep)
+                   for ep in ("tokentx", "txlist", "txlistinternal")}
+    startblocks = {ep: (lb + 1 if lb > 0 else 0) for ep, lb in last_blocks.items()}
 
     # 1 — ERC-20 transfers
     # One transaction can contain multiple Transfer events (e.g. disperseToken).
@@ -341,7 +361,7 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
     # We suffix duplicate hashes (_dup1, _dup2, ...) so each event gets a unique key.
     try:
         tokentx_hash_counts: dict[str, int] = {}
-        for raw in api.fetch_tokentx(addr, chain, startblock):
+        for raw in api.fetch_tokentx(addr, chain, startblocks["tokentx"]):
             parsed = _parse_tokentx_row(raw, addr, chain)
             if parsed:
                 h = parsed["tx_hash"]
@@ -349,31 +369,31 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
                 tokentx_hash_counts[h] = count + 1
                 if count > 0:
                     parsed["tx_hash"] = f"{h}_dup{count}"
-                _add(parsed)
-    except Exception:
-        pass
+                _add(parsed, "tokentx")
+    except Exception as e:
+        result.endpoint_errors["tokentx"] = f"{type(e).__name__}: {e}"
 
     # 2 — Native transfers + gas fees
     # Also collect raw txlist rows for WETH reconciliation in step 4.
     txlist_rows: list[dict] = []
     try:
-        for raw in api.fetch_txlist(addr, chain, startblock):
+        for raw in api.fetch_txlist(addr, chain, startblocks["txlist"]):
             txlist_rows.append(raw)
             for parsed in _parse_txlist_row(raw, addr, chain):
-                _add(parsed)
-    except Exception:
-        pass
+                _add(parsed, "txlist")
+    except Exception as e:
+        result.endpoint_errors["txlist"] = f"{type(e).__name__}: {e}"
 
     # 3 — Internal native transfers
     try:
         idx = 0
-        for raw in api.fetch_txlistinternal(addr, chain, startblock):
+        for raw in api.fetch_txlistinternal(addr, chain, startblocks["txlistinternal"]):
             parsed = _parse_internal_row(raw, addr, chain, idx)
             idx += 1
             if parsed:
-                _add(parsed)
-    except Exception:
-        pass
+                _add(parsed, "txlistinternal")
+    except Exception as e:
+        result.endpoint_errors["txlistinternal"] = f"{type(e).__name__}: {e}"
 
     # 4 — Native-wrap reconciliation
     # Some contracts (WETH and similar) wrap native ETH into an ERC-20 with symbol
@@ -427,7 +447,7 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
                 "contract_address": contract_addr,
                 "amount":           to_db(amount),
                 "source":           "txlist",
-            })
+            }, "txlist")
 
     # 4b — Amount-based fallback for ETH-renamed tokens routed via a DEX/router.
     # When ETH is sent to a router (not directly to the vault), the to-address check
@@ -462,7 +482,7 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
             "contract_address": contract_addr,
             "amount":           to_db(deficit),
             "source":           "txlist",
-        })
+        }, "txlist")
 
     # Persist
     result.new_tx = _insert_rows(buffer, wallet_id)
@@ -471,9 +491,14 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
     for row in buffer:
         _upsert_token_review(wallet_id, chain, row["asset"], row.get("contract_address"))
 
-    # Save incremental state
-    if result.max_block > last_block:
-        _save_last_block(wallet_id, chain, result.max_block)
+    # Save incremental state — but ONLY for endpoints that completed without
+    # error. A failed endpoint keeps its old cursor so the next fetch retries
+    # the same range instead of silently skipping the missed window.
+    for endpoint, max_block in result.max_block_per_endpoint.items():
+        if endpoint in result.endpoint_errors:
+            continue
+        if max_block > last_blocks.get(endpoint, 0):
+            _save_last_block(wallet_id, chain, endpoint, max_block)
 
     return result
 
@@ -511,6 +536,13 @@ def fetch_all(
             try:
                 result = fetch_wallet(wallet["id"], wallet["address"], chain)
                 summary.results.append(result)
+                # Surface per-endpoint failures (rate limit, server errors)
+                # so the UI can show them without scaring the user — the
+                # data is still partially fetched, just not the full window.
+                for endpoint, err in result.endpoint_errors.items():
+                    summary.errors.append(
+                        f"{label} / {wallet['name']} / {endpoint}: {err}"
+                    )
             except Exception as e:
                 summary.errors.append(f"{label} / {wallet['name']}: {e}")
 
