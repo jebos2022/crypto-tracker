@@ -44,6 +44,17 @@ CREATE TABLE IF NOT EXISTS token_review (
     accepted         INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (wallet_id, chain, asset)
 );
+
+-- token_meta: per-contract decimals + symbol, harvested from tokentx rows.
+-- Needed to scale raw balances from `tokenbalance` for verification.
+CREATE TABLE IF NOT EXISTS token_meta (
+    chain            TEXT    NOT NULL,
+    contract_address TEXT    NOT NULL,
+    symbol           TEXT,
+    decimals         INTEGER NOT NULL DEFAULT 18,
+    last_seen        TEXT,
+    PRIMARY KEY (chain, contract_address)
+);
 """
 
 INDICES_SQL = """
@@ -131,6 +142,8 @@ def clear_transactions() -> None:
         conn.execute("DELETE FROM transactions")
         conn.execute("DELETE FROM wallet_chain_state")
         conn.execute("DELETE FROM token_review")
+        # token_meta is intentionally kept — decimals don't change and re-fetch
+        # would just re-populate identical rows. Wipe via reset_db() if needed.
         conn.commit()
     finally:
         conn.close()

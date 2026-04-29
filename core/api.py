@@ -239,3 +239,70 @@ def fetch_txlistinternal(address: str, chain: str, startblock: int = 0) -> list[
         },
         startblock=startblock,
     )
+
+
+# ---------------------------------------------------------------------------
+# Live balance lookups (single-call, no pagination)
+# ---------------------------------------------------------------------------
+
+def _single_call(url: str, params: dict) -> str:
+    """
+    Issue a single balance/tokenbalance request and return the raw `result`
+    string (an unscaled integer). Reuses the rate-limit retry logic from
+    `_request_with_retry` but bypasses the pagination loop — these endpoints
+    return one number, not a list.
+    """
+    with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
+        backoff = INITIAL_BACKOFF
+        for attempt in range(MAX_RETRIES):
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            status  = data.get("status")
+            message = data.get("message", "")
+            result  = data.get("result")
+            if status == "1":
+                return str(result)
+            # status == "0" — Etherscan may legitimately return "0" balance
+            # with status="1", so a "0" status here means an actual problem.
+            if _is_rate_limit(message, result):
+                if attempt == MAX_RETRIES - 1:
+                    raise EtherscanRateLimit(f"{message}: {result}")
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            raise EtherscanError(f"{message}: {result}")
+    raise EtherscanRateLimit("exhausted retries")
+
+
+def fetch_native_balance(address: str, chain: str) -> int:
+    """
+    Live native-token balance (ETH/POL/BEAM) in wei. Use `decimals=18`
+    universally to scale.
+    """
+    url = _api_url(chain)
+    params = {
+        **_api_params(chain),
+        "module":  "account",
+        "action":  "balance",
+        "address": address.lower(),
+        "tag":     "latest",
+    }
+    return int(_single_call(url, params))
+
+
+def fetch_token_balance(address: str, contract_address: str, chain: str) -> int:
+    """
+    Live ERC-20 balance (raw, unscaled integer). Caller must scale by the
+    token's decimals to get a human-readable amount.
+    """
+    url = _api_url(chain)
+    params = {
+        **_api_params(chain),
+        "module":          "account",
+        "action":          "tokenbalance",
+        "contractaddress": contract_address.lower(),
+        "address":         address.lower(),
+        "tag":             "latest",
+    }
+    return int(_single_call(url, params))
