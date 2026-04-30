@@ -95,17 +95,17 @@ Volgorde van werken: kickoff (Opus) per fase → blokken sequentieel → fase-re
 - [x] Kolommen: datum, type, bedrag, asset, tx_hash (kort), bron-endpoint
 - [x] Etherscan-link per rij
 - [x] Test: happy / leeg / regressie
-- [ ] /review groen → merge
+- [x] /review groen → merge
 
 ### Blok 2.B — Export naar CSV
 **Branch:** feature/2-b-ledger-export — **Model:** Haiku
 - [x] Download-knop levert CSV met huidige filter
 - [x] Bestandsnaam bevat wallet/token/datum
 - [x] Test: happy / lege filter / regressie
-- [ ] /review groen → merge
+- [x] /review groen → merge
 
 ### Fase 2 afgerond
-- [ ] `/ultrareview` op fase 2
+- [x] `/ultrareview` op fase 2
 
 ---
 

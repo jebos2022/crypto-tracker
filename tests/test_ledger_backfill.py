@@ -73,6 +73,62 @@ class LedgerBackfillTests(unittest.TestCase):
         self.assertEqual(rows[(f"{HASH}_fee", "txlist")][0], "approve(address spender,uint256 amount)")
         self.assertEqual(rows[(HASH, "tokentx")][0], None)
 
+    def test_update_matching_rows_does_not_recount_missing_method_name_without_new_value(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "backfill.db"
+
+        def conn_factory() -> sqlite3.Connection:
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+        conn = conn_factory()
+        conn.execute(
+            """
+            CREATE TABLE transactions (
+                wallet_id INTEGER,
+                chain TEXT,
+                tx_hash TEXT,
+                source TEXT,
+                method_id TEXT,
+                method_name TEXT,
+                from_address TEXT,
+                to_address TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                "ethereum",
+                HASH,
+                "txlist",
+                "0x2213bc0b",
+                None,
+                "0x" + "1" * 40,
+                "0x" + "2" * 40,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        original = ledger_backfill.get_connection
+        ledger_backfill.get_connection = conn_factory
+        try:
+            updated = ledger_backfill._update_matching_rows(
+                1,
+                "ethereum",
+                HASH,
+                "0x2213bc0b",
+                None,
+                "0x" + "1" * 40,
+                "0x" + "2" * 40,
+            )
+        finally:
+            ledger_backfill.get_connection = original
+
+        self.assertEqual(updated, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

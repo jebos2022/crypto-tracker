@@ -113,11 +113,26 @@ def _update_matching_rows(
                AND source = 'txlist'
                AND (tx_hash = ? OR tx_hash LIKE ?)
                AND (
-                    method_id IS NULL OR method_name IS NULL
-                    OR from_address IS NULL OR to_address IS NULL
+                    (method_id IS NULL AND ? IS NOT NULL)
+                    OR (method_name IS NULL AND ? IS NOT NULL)
+                    OR (from_address IS NULL AND ? IS NOT NULL)
+                    OR (to_address IS NULL AND ? IS NOT NULL)
                )
             """,
-            (method_id, method_name, from_address, to_address, wallet_id, chain, tx_hash, f"{tx_hash}_%"),
+            (
+                method_id,
+                method_name,
+                from_address,
+                to_address,
+                wallet_id,
+                chain,
+                tx_hash,
+                f"{tx_hash}_%",
+                method_id,
+                method_name,
+                from_address,
+                to_address,
+            ),
         )
         updated = conn.execute("SELECT changes()").fetchone()[0]
         conn.commit()
