@@ -5,7 +5,7 @@ from core.db import get_connection
 from core.models import CHAINS
 from core.fetcher import fetch_all
 from core.token_review import (
-    get_unique_tokens, set_token_accepted_global,
+    get_unique_tokens, save_token_selection_global,
     accept_all_tokens, auto_reject_scams, accept_non_scams,
     is_scam, is_suspicious_by_metadata, looks_like_ticker,
     enrich_tokens, count_enrichable_contracts,
@@ -231,9 +231,10 @@ else:
         )
 
         if st.button("Selectie opslaan", type="primary", use_container_width=True, key="save_sel_btn"):
-            for i, t in enumerate(clean):
-                new_val = bool(edited.iloc[i]["Importeren"])
-                set_token_accepted_global(t["chain"], t["asset"], new_val)
+            save_token_selection_global([
+                (t["chain"], t["asset"], bool(edited.iloc[i]["Importeren"]))
+                for i, t in enumerate(clean)
+            ])
             accepted = int(edited["Importeren"].sum())
             st.success(f"✅ Opgeslagen — {accepted} token(s) geselecteerd.")
             st.rerun()
@@ -260,8 +261,10 @@ else:
                 key="susp_editor",
             )
             if st.button("Verdachte selectie opslaan", key="save_susp_btn"):
-                for i, t in enumerate(meta_susp):
-                    set_token_accepted_global(t["chain"], t["asset"], bool(edited_susp.iloc[i]["Importeren"]))
+                save_token_selection_global([
+                    (t["chain"], t["asset"], bool(edited_susp.iloc[i]["Importeren"]))
+                    for i, t in enumerate(meta_susp)
+                ])
                 st.success("✅ Opgeslagen.")
                 st.rerun()
 

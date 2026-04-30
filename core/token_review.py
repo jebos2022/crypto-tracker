@@ -141,6 +141,28 @@ def set_token_accepted_global(chain: str, asset: str, accepted: bool) -> None:
         conn.close()
 
 
+def save_token_selection_global(selections: list[tuple[str, str, bool]]) -> None:
+    """
+    Save token-review checkbox edits and then enforce staking wrapper acceptance.
+
+    Writes the full batch first, then runs sync_staking_wrappers() once after
+    all checkbox values are persisted — prevents a stale unchecked stPEAR
+    checkbox from overwriting a cascade that accepted it via PEAR.
+    """
+    conn = get_connection()
+    try:
+        for chain, asset, accepted in selections:
+            conn.execute(
+                "UPDATE token_review SET accepted = ? WHERE chain = ? AND asset = ?",
+                (1 if accepted else 0, chain, asset),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    sync_staking_wrappers()
+
+
 def sync_staking_wrappers() -> None:
     """Ensure staked wrapper tokens are accepted whenever their underlying is accepted."""
     from core.models import STAKED_TOKENS
