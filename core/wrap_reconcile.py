@@ -1,8 +1,8 @@
 """
 Pure function: synthesize missing WRAP/WETH TRANSFER_IN rows.
 
-No HTTP, no DB. Input = buffer + txlist_rows already parsed. Output = new rows
-to append. Caller (_add) handles dedup and block-cursor bookkeeping.
+No HTTP, no DB. Input: buffer (parsed rows) + txlist_rows (raw API dicts).
+Output: new rows to append. Caller (_add) handles dedup and block-cursor bookkeeping.
 """
 
 import uuid
@@ -23,13 +23,7 @@ def synthesize_wrap_rows(
 ) -> list[dict]:
     """
     Return synthetic TRANSFER_IN rows for native-wrap events that Etherscan
-    omits from tokentx (e.g. WETH mint, ETH-named wrapper tokens).
-
-    Section 4 — Native-wrap reconciliation
-    Some contracts (WETH and similar) wrap native ETH into an ERC-20 with symbol
-    "ETH". Etherscan tokentx omits the Transfer(0x0, wallet, amount) mint event.
-    We detect missing mints by matching txlist deposits (to=contract, value>0)
-    against TRANSFER_INs in the buffer, and synthesise the missing rows.
+    omits from tokentx (e.g. WETH mint, ETH-named wrapper tokens via DEX/router).
     """
     result: list[dict] = []
 
@@ -83,7 +77,7 @@ def synthesize_wrap_rows(
     for contract_addr, sym in wrap_contracts.items():
         if sym == "WETH":
             continue
-        buf_ins  = [r for r in buffer if r["asset"] == sym and r["type"] == TRANSFER_IN]
+        buf_ins  = [r for r in buffer + result if r["asset"] == sym and r["type"] == TRANSFER_IN]
         buf_outs = [r for r in buffer if r["asset"] == sym and r["type"] == TRANSFER_OUT]
         if not buf_outs or buf_ins:
             continue
