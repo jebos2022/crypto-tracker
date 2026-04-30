@@ -3,26 +3,22 @@ Fetch orchestration: parse raw API rows, deduplicate, persist to DB.
 Calls core/api.py for HTTP and core/db.py for storage. No HTTP code here.
 """
 
-import uuid
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
 
 from core import api
 from core.db import get_connection
 from core.models import (
-    CHAINS, WETH_CONTRACTS,
-    TRANSFER_IN,
+    CHAINS,
     get_staked_info,
-    to_decimal, to_db,
 )
 from core.parsers import (
-    _unix_to_iso,
     _parse_tokentx_row,
     _parse_txlist_row,
     _parse_internal_row,
 )
+from core.wrap_reconcile import synthesize_wrap_rows
 
 
 # ---------------------------------------------------------------------------
@@ -131,22 +127,19 @@ def _insert_rows(rows: list[dict], wallet_id: int) -> int:
     try:
         inserted = 0
         for row in rows:
-            try:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO transactions
-                      (id, wallet_id, chain, timestamp, block_number, tx_hash,
-                       type, asset, contract_address, amount, source)
-                    VALUES
-                      (:id, :wallet_id, :chain, :timestamp, :block_number, :tx_hash,
-                       :type, :asset, :contract_address, :amount, :source)
-                    """,
-                    {**row, "wallet_id": wallet_id},
-                )
-                if conn.execute("SELECT changes()").fetchone()[0]:
-                    inserted += 1
-            except Exception:
-                pass
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO transactions
+                  (id, wallet_id, chain, timestamp, block_number, tx_hash,
+                   type, asset, contract_address, amount, source)
+                VALUES
+                  (:id, :wallet_id, :chain, :timestamp, :block_number, :tx_hash,
+                   :type, :asset, :contract_address, :amount, :source)
+                """,
+                {**row, "wallet_id": wallet_id},
+            )
+            if conn.execute("SELECT changes()").fetchone()[0]:
+                inserted += 1
         conn.commit()
         return inserted
     finally:
@@ -299,84 +292,9 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
     except Exception as e:
         result.endpoint_errors["txlistinternal"] = f"{type(e).__name__}: {e}"
 
-    # 4 — Native-wrap reconciliation
-    # Some contracts (WETH and similar) wrap native ETH into an ERC-20 with symbol
-    # "ETH". Etherscan tokentx omits the Transfer(0x0, wallet, amount) mint event.
-    # We detect missing mints by matching txlist deposits (to=contract, value>0)
-    # against TRANSFER_INs in the buffer, and synthesise the missing rows.
-    native = CHAINS[chain]["native"]
-    wrap_contracts: dict[str, str] = {}  # contract_addr → asset symbol
-
-    weth_addr = WETH_CONTRACTS.get(chain)
-    if weth_addr:
-        wrap_contracts[weth_addr] = "WETH"
-
-    for r in buffer:
-        if r.get("source") == "tokentx" and r.get("contract_address"):
-            sym = r["asset"]
-            if sym.startswith(native + "-"):
-                wrap_contracts[r["contract_address"]] = sym
-
-    for contract_addr, sym in wrap_contracts.items():
-        ins_seen = {
-            r["tx_hash"] for r in buffer
-            if r["asset"] == sym and r["type"] == TRANSFER_IN
-        }
-        for raw in txlist_rows:
-            if raw.get("isError", "0") == "1":
-                continue
-            if raw.get("to", "").lower() != contract_addr:
-                continue
-            value_wei = to_decimal(raw.get("value", "0"))
-            if value_wei <= 0:
-                continue
-            h = raw.get("hash", "")
-            if h in ins_seen or any(k.startswith(h + "_dup") for k in ins_seen):
-                continue
-            amount = value_wei / Decimal("10") ** 18
-            _add({
-                "id":               str(uuid.uuid4()),
-                "chain":            chain,
-                "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
-                "block_number":     int(raw.get("blockNumber", "0") or "0"),
-                "tx_hash":          f"{h}_wrap_{contract_addr[:6]}",
-                "type":             TRANSFER_IN,
-                "asset":            sym,
-                "contract_address": contract_addr,
-                "amount":           to_db(amount),
-                "source":           "txlist",
-            }, "txlist")
-
-    # 4b — Amount-based fallback for ETH-renamed tokens routed via a DEX/router.
-    for contract_addr, sym in wrap_contracts.items():
-        if sym == "WETH":
-            continue
-        buf_ins  = [r for r in buffer if r["asset"] == sym and r["type"] == TRANSFER_IN]
-        buf_outs = [r for r in buffer if r["asset"] == sym and r["type"] == TRANSFER_OUT]
-        if not buf_outs or buf_ins:
-            continue
-        deficit = sum(abs(Decimal(r["amount"])) for r in buf_outs)
-        candidates = [
-            raw for raw in txlist_rows
-            if raw.get("isError", "0") != "1"
-            and to_decimal(raw.get("value", "0")) / Decimal("10") ** 18 == deficit
-        ]
-        if len(candidates) != 1:
-            continue
-        raw = candidates[0]
-        h = raw.get("hash", "")
-        _add({
-            "id":               str(uuid.uuid4()),
-            "chain":            chain,
-            "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
-            "block_number":     int(raw.get("blockNumber", "0") or "0"),
-            "tx_hash":          f"{h}_wrap_amt_{contract_addr[:6]}",
-            "type":             TRANSFER_IN,
-            "asset":            sym,
-            "contract_address": contract_addr,
-            "amount":           to_db(deficit),
-            "source":           "txlist",
-        }, "txlist")
+    # 4 — Native-wrap reconciliation (see core/wrap_reconcile.py)
+    for synth in synthesize_wrap_rows(buffer, txlist_rows, chain):
+        _add(synth, "txlist")
 
     # Persist
     result.new_tx = _insert_rows(buffer, wallet_id)

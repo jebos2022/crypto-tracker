@@ -316,3 +316,39 @@ if bridge_summary:
             "Bridge-uitgaande transfers gaan naar een ander netwerk. Als je dat netwerk ook "
             "importeert zie je daar de inkomende kant terug en is het netto saldo nul."
         )
+
+# ---------------------------------------------------------------------------
+# BEAM node staking
+# ---------------------------------------------------------------------------
+st.divider()
+st.subheader("BEAM node staking")
+st.caption(
+    "Gestaked BEAM op de node staking contract. Live berekend via de BEAM chain API. "
+    "Formule: Σ deposits naar contract − Σ withdrawals van contract."
+)
+
+if st.button("Laad BEAM staking saldo", key="beam_staking_btn"):
+    from core.db import get_connection as _gc
+    from core.staking import fetch_beam_staking_balance
+
+    conn = _gc()
+    beam_wallets = conn.execute(
+        "SELECT id, name, address FROM wallets ORDER BY id"
+    ).fetchall()
+    conn.close()
+
+    staking_rows = []
+    for w in beam_wallets:
+        bal = fetch_beam_staking_balance(w["address"])
+        if bal is not None and abs(bal) > Decimal("1"):
+            staking_rows.append({
+                "Wallet": w["name"],
+                "Chain": "BEAM",
+                "Token": "BEAM (gestaked)",
+                "Balans": format_token(bal),
+            })
+
+    if staking_rows:
+        st.dataframe(pd.DataFrame(staking_rows), hide_index=True, use_container_width=True)
+    else:
+        st.info("Geen BEAM staking gevonden voor de bekende wallets.")

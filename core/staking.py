@@ -43,3 +43,36 @@ def all_staking_rates() -> dict[tuple[str, str], Decimal]:
             if rate is not None:
                 rates[(chain, staked_token)] = rate
     return rates
+
+
+BEAM_STAKING_CONTRACT = "0x2fd428a5484d113294b44e69cb9f269abc1d5b54"
+
+
+def fetch_beam_staking_balance(address: str) -> Decimal | None:
+    """
+    Live calculation of staked BEAM through the node staking contract.
+    Returns the net staked amount, or None when the API call fails.
+    """
+    try:
+        deposits = Decimal("0")
+        for row in api.fetch_txlist(address, "beam"):
+            if row.get("isError", "0") == "1":
+                continue
+            if row.get("to", "").lower() != BEAM_STAKING_CONTRACT:
+                continue
+            v = Decimal(row.get("value", "0") or "0")
+            if v > 0:
+                deposits += v
+
+        withdrawals = Decimal("0")
+        for row in api.fetch_txlistinternal(address, "beam"):
+            if row.get("from", "").lower() != BEAM_STAKING_CONTRACT:
+                continue
+            v = Decimal(row.get("value", "0") or "0")
+            if v > 0:
+                withdrawals += v
+
+        wei = Decimal("10") ** 18
+        return (deposits - withdrawals) / wei
+    except Exception:
+        return None
