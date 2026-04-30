@@ -1,5 +1,6 @@
 .env
 *.db
+*.db-*
 *.bak
 backups/
 __pycache__/

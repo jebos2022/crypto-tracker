@@ -127,22 +127,19 @@ def _insert_rows(rows: list[dict], wallet_id: int) -> int:
     try:
         inserted = 0
         for row in rows:
-            try:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO transactions
-                      (id, wallet_id, chain, timestamp, block_number, tx_hash,
-                       type, asset, contract_address, amount, source)
-                    VALUES
-                      (:id, :wallet_id, :chain, :timestamp, :block_number, :tx_hash,
-                       :type, :asset, :contract_address, :amount, :source)
-                    """,
-                    {**row, "wallet_id": wallet_id},
-                )
-                if conn.execute("SELECT changes()").fetchone()[0]:
-                    inserted += 1
-            except Exception:
-                pass
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO transactions
+                  (id, wallet_id, chain, timestamp, block_number, tx_hash,
+                   type, asset, contract_address, amount, source)
+                VALUES
+                  (:id, :wallet_id, :chain, :timestamp, :block_number, :tx_hash,
+                   :type, :asset, :contract_address, :amount, :source)
+                """,
+                {**row, "wallet_id": wallet_id},
+            )
+            if conn.execute("SELECT changes()").fetchone()[0]:
+                inserted += 1
         conn.commit()
         return inserted
     finally:

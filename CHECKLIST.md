@@ -20,6 +20,8 @@ Volgorde van werken: kickoff (Opus) per fase → blokken sequentieel → fase-re
 
 ## Fase 1 — On-chain MVP afronden
 
+> Kickoff: Opus 4.7, 2026-04-30. Blokken 1.A–1.D afgerond.
+
 ### Eerder gebouwd (al klaar)
 
 - [x] `core/db.py` — schema (wallets, transactions, token_review, wallet_chain_state, token_metadata)
@@ -37,46 +39,46 @@ Volgorde van werken: kickoff (Opus) per fase → blokken sequentieel → fase-re
 
 ### Blok 1.A — fetcher.py refactor + main.py opruimen
 **Branch:** feature/1-a-fetcher-refactor — **Model:** Sonnet
-- [ ] core/fetcher.py < 400 regels
-- [ ] Wrap-reconciliation logica geëxtraheerd naar eigen module
-- [ ] main.py weg of vervangen door zinvolle entrypoint
-- [ ] Bestaande publieke API ongewijzigd
-- [ ] Test: happy path / wrap-edge / regressie incremental
-- [ ] /review groen → merge
+- [x] core/fetcher.py < 400 regels
+- [x] Wrap-reconciliation logica geëxtraheerd naar eigen module
+- [x] main.py weg of vervangen door zinvolle entrypoint
+- [x] Bestaande publieke API ongewijzigd
+- [x] Test: happy path / wrap-edge / regressie incremental
+- [x] /review groen → merge
 
 ### Blok 1.B — ETH 96 dataverlies herstellen
 **Branch:** geen — operationele actie — **Model:** Sonnet
-- [ ] wallet_chain_state reset (main + ethereum + txlist)
-- [ ] Re-fetch uitgevoerd
-- [ ] On-chain verificatie ETH/main toont ✅
-- [ ] Test: geen dubbele transacties / andere wallets onaangetast
+- [x] wallet_chain_state reset (main + ethereum + txlist)
+- [x] Re-fetch uitgevoerd
+- [x] On-chain verificatie ETH/main toont ✅
+- [x] Test: geen dubbele transacties / andere wallets onaangetast
 
 ### Blok 1.C — PEAR/Arbitrum fetch debuggen
 **Branch:** feature/1-c-pear-debug — **Model:** Opus
-- [ ] Root cause schriftelijk vastgelegd
-- [ ] PEAR + stPEAR zichtbaar in token-review na fetch
-- [ ] stPEAR auto-accepted zodra PEAR accepted
-- [ ] Test: happy path / leeg / regressie andere chains
-- [ ] /review groen → merge
+- [x] Root cause schriftelijk vastgelegd
+- [x] PEAR + stPEAR zichtbaar in token-review na fetch
+- [x] stPEAR auto-accepted zodra PEAR accepted
+- [x] Test: happy path / leeg / regressie andere chains
+- [x] /review groen → merge
 
 ### Blok 1.D — BEAM node staking saldo tonen
 **Branch:** feature/1-d-beam-staking — **Model:** Opus
-- [ ] BEAM-staking-positie zichtbaar op balansen-pagina
-- [ ] Reproduceerbare berekening, formule in code gedocumenteerd
-- [ ] Werkt zonder volledige re-fetch
-- [ ] Test: 5M zichtbaar / lege wallet / regressie andere balansen
-- [ ] /review groen → merge
+- [x] BEAM-staking-positie zichtbaar op balansen-pagina
+- [x] Reproduceerbare berekening, formule in code gedocumenteerd
+- [x] Werkt zonder volledige re-fetch
+- [x] Test: 5M zichtbaar / lege wallet / regressie andere balansen
+- [x] /review groen → merge
 
 ### Blok 1.E — Memory + spec opschonen
 **Branch:** feature/1-e-memory-cleanup — **Model:** Haiku
-- [ ] WIP staked-tokens memory weg
-- [ ] project_open_issues.md gemarkeerd "afgehandeld"
-- [ ] CHECKLIST in lijn met spec
-- [ ] Test: geen verwijzingen naar oude memory / project_later_list intact
+- [x] WIP staked-tokens memory weg
+- [x] project_open_issues.md gemarkeerd "afgehandeld"
+- [x] CHECKLIST in lijn met spec
+- [x] Test: geen verwijzingen naar oude memory / project_later_list intact
 
 ### Fase 1 afgerond
-- [ ] `/ultrareview` op fase 1 (alle blokken samen)
-- [ ] Alle 3 open issues gesloten
+- [x] `/ultrareview` op fase 1 (alle blokken samen)
+- [x] Alle 3 open issues gesloten
 
 ---
 

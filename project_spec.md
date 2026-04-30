@@ -79,7 +79,7 @@ Per blok staat in deze spec welk model aanbevolen is. Modelwissel doe je via `/m
 
 | Fase | Naam | Status |
 |---|---|---|
-| 1 | On-chain MVP afronden | ⏳ Bezig |
+| 1 | On-chain MVP afronden | ✅ Afgerond |
 | 2 | Ledger-pagina (transactiehistorie) | ☐ Open |
 | 3 | EUR-prijslaag (CoinGecko) | ☐ Open |
 | 4 | Schema-unificatie + Bitcoin | ☐ Open |
@@ -170,7 +170,7 @@ ongebruikte [main.py](main.py) opruimen.
 **Doel:** Stale memory weg, nieuwe workflow vastgelegd, alle docs consistent.
 **Aanbevolen model:** Haiku — mechanische update.
 **Branch:** feature/1-e-memory-cleanup
-**Wijzigt:** memory/MEMORY.md, memory/project_wip_staked_tokens.md (verwijderen).
+**Wijzigt:** memory/project_open_issues.md, CHECKLIST.md, project_spec.md.
 
 **Acceptatiecriteria:**
 - [ ] WIP staked-tokens memory weg (feature is klaar)
