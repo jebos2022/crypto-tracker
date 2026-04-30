@@ -117,18 +117,24 @@ ongebruikte [main.py](main.py) opruimen.
 ### Blok 1.B — ETH 96 dataverlies herstellen
 
 **Doel:** Main-wallet ETH-saldo terug van 96 naar 0,107 ETH (on-chain waarheid).
-**Aanbevolen model:** Sonnet — eenmalige SQL + verificatie, geen architectuur.
-**Branch:** geen code-wijziging — operationele actie via DB.
-**Wijzigt:** data/portfolio.db (state-reset), geen code.
+**Aanbevolen model:** Sonnet — diagnose + schema-migratie + verificatie.
+**Branch:** feature/1-b-eth-dedup-fix
+**Wijzigt:** core/db.py (constraint + migratie), core/fetcher.py (dedup key), CLAUDE.md, REVIEW.md.
+
+**Root cause:** Niet een cursor-bug maar een dedup-bug. `UNIQUE(tx_hash, wallet_id)` blokkeerde
+txlist TRANSFER_OUTs wanneer dezelfde outer tx_hash ook in tokentx stond (bijv. "koop tokens
+met ETH" via Uniswap). 119 TRANSFER_OUTs geblokkeerd → 95,96 ETH te hoog computed.
 
 **Acceptatiecriteria:**
-- [ ] `wallet_chain_state` voor wallet=main, chain=ethereum, endpoint=txlist gereset naar last_block=0
-- [ ] Re-fetch uitgevoerd (Importeren-pagina)
-- [ ] On-chain verificatie op balansen-pagina toont ✅ voor ETH op main
+- [x] `UNIQUE(tx_hash, wallet_id, source)` in schema + migratie in `_migrate_tx_dedup_constraint`
+- [x] In-memory dedup in fetcher gebruikt `(tx_hash, source)` als key
+- [x] txlist cursor gereset en re-fetch uitgevoerd
+- [x] On-chain verificatie ETH/main toont ✅
+- [x] CLAUDE.md Les 1 en REVIEW.md bijgewerkt
 
 **Test-scenarios:**
-1. **Happy path:** SQL → re-fetch → verifieer-knop → ∆ ≈ 0 voor ETH/main.
-2. **Edge case:** geen dubbele transacties (INSERT OR IGNORE moet werken).
+1. **Happy path:** re-fetch → TRANSFER_OUT count ~202, ETH computed ≈ 0,107.
+2. **Edge case:** bestaande tokentx-rijen blijven intact na schema-migratie.
 3. **Regressie:** andere wallets/chains blijven onaangetast.
 
 ### Blok 1.C — PEAR/Arbitrum fetch debuggen
