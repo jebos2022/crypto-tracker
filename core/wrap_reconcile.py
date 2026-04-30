@@ -13,7 +13,7 @@ from core.models import (
     TRANSFER_IN, TRANSFER_OUT,
     to_decimal, to_db,
 )
-from core.parsers import _unix_to_iso
+from core.parsers import _address_metadata, _method_metadata, _unix_to_iso
 
 
 def synthesize_wrap_rows(
@@ -63,11 +63,13 @@ def synthesize_wrap_rows(
                 "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
                 "block_number":     int(raw.get("blockNumber", "0") or "0"),
                 "tx_hash":          f"{h}_wrap_{contract_addr[:6]}",
+                **_address_metadata(raw),
                 "type":             TRANSFER_IN,
                 "asset":            sym,
                 "contract_address": contract_addr,
                 "amount":           to_db(amount),
                 "source":           "txlist",
+                **_method_metadata(raw),
             })
 
     # 4b — Amount-based fallback for ETH-renamed tokens routed via a DEX/router.
@@ -97,11 +99,13 @@ def synthesize_wrap_rows(
             "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
             "block_number":     int(raw.get("blockNumber", "0") or "0"),
             "tx_hash":          f"{h}_wrap_amt_{contract_addr[:6]}",
+            **_address_metadata(raw),
             "type":             TRANSFER_IN,
             "asset":            sym,
             "contract_address": contract_addr,
             "amount":           to_db(deficit),
             "source":           "txlist",
+            **_method_metadata(raw),
         })
 
     return result

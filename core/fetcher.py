@@ -131,12 +131,21 @@ def _insert_rows(rows: list[dict], wallet_id: int) -> int:
                 """
                 INSERT OR IGNORE INTO transactions
                   (id, wallet_id, chain, timestamp, block_number, tx_hash,
-                   type, asset, contract_address, amount, source)
+                   from_address, to_address, type, asset, contract_address,
+                   amount, source, method_id, method_name)
                 VALUES
                   (:id, :wallet_id, :chain, :timestamp, :block_number, :tx_hash,
-                   :type, :asset, :contract_address, :amount, :source)
+                   :from_address, :to_address, :type, :asset, :contract_address,
+                   :amount, :source, :method_id, :method_name)
                 """,
-                {**row, "wallet_id": wallet_id},
+                {
+                    **row,
+                    "wallet_id": wallet_id,
+                    "from_address": row.get("from_address"),
+                    "to_address": row.get("to_address"),
+                    "method_id": row.get("method_id"),
+                    "method_name": row.get("method_name"),
+                },
             )
             if conn.execute("SELECT changes()").fetchone()[0]:
                 inserted += 1

@@ -23,6 +23,20 @@ def _unix_to_iso(ts_str: str) -> str:
         return ""
 
 
+def _method_metadata(raw: dict) -> dict:
+    method_id = (raw.get("methodId") or "").strip() or None
+    method_name = (raw.get("functionName") or "").strip() or None
+    if method_id == "0x":
+        method_id = None
+    return {"method_id": method_id, "method_name": method_name}
+
+
+def _address_metadata(raw: dict) -> dict:
+    from_address = (raw.get("from") or "").lower().strip() or None
+    to_address = (raw.get("to") or "").lower().strip() or None
+    return {"from_address": from_address, "to_address": to_address}
+
+
 def _parse_tokentx_row(raw: dict, wallet: str, chain: str) -> dict | None:
     from_addr = raw.get("from", "").lower()
     to_addr   = raw.get("to",   "").lower()
@@ -59,11 +73,13 @@ def _parse_tokentx_row(raw: dict, wallet: str, chain: str) -> dict | None:
         "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
         "block_number":     int(raw.get("blockNumber", "0") or "0"),
         "tx_hash":          raw.get("hash", ""),
+        **_address_metadata(raw),
         "type":             direction,
         "asset":            symbol,
         "contract_address": contract,
         "amount":           to_db(signed),
         "source":           "tokentx",
+        **_method_metadata(raw),
     }
 
 
@@ -97,11 +113,13 @@ def _parse_txlist_row(raw: dict, wallet: str, chain: str) -> list[dict]:
                 "timestamp":        ts,
                 "block_number":     block_number,
                 "tx_hash":          outer_hash,
+                **_address_metadata(raw),
                 "type":             direction,
                 "asset":            native,
                 "contract_address": None,
                 "amount":           to_db(signed),
                 "source":           "txlist",
+                **_method_metadata(raw),
             })
 
     # Gas fee — wallet is sender, regardless of success/failure
@@ -116,11 +134,13 @@ def _parse_txlist_row(raw: dict, wallet: str, chain: str) -> list[dict]:
                 "timestamp":        ts,
                 "block_number":     block_number,
                 "tx_hash":          outer_hash + "_fee",
+                **_address_metadata(raw),
                 "type":             GAS_FEE,
                 "asset":            native,
                 "contract_address": None,
                 "amount":           to_db(-fee),
                 "source":           "txlist",
+                **_method_metadata(raw),
             })
 
     return rows
@@ -158,9 +178,11 @@ def _parse_internal_row(raw: dict, wallet: str, chain: str, idx: int) -> dict | 
         "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
         "block_number":     int(raw.get("blockNumber", "0") or "0"),
         "tx_hash":          f"{outer_hash}_int_{idx}" if outer_hash else f"_int_{idx}",
+        **_address_metadata(raw),
         "type":             direction,
         "asset":            native,
         "contract_address": None,
         "amount":           to_db(signed),
         "source":           "txlistinternal",
+        **_method_metadata(raw),
     }

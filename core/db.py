@@ -28,11 +28,15 @@ CREATE TABLE IF NOT EXISTS transactions (
     timestamp        TEXT    NOT NULL,
     block_number     INTEGER NOT NULL DEFAULT 0,
     tx_hash          TEXT    NOT NULL,
+    from_address     TEXT,
+    to_address       TEXT,
     type             TEXT    NOT NULL,
     asset            TEXT    NOT NULL,
     contract_address TEXT,
     amount           TEXT    NOT NULL,
     source           TEXT    NOT NULL,
+    method_id        TEXT,
+    method_name      TEXT,
     UNIQUE (tx_hash, wallet_id, source)
 );
 
@@ -159,16 +163,47 @@ def _migrate_tx_dedup_constraint(conn: sqlite3.Connection) -> None:
             timestamp        TEXT    NOT NULL,
             block_number     INTEGER NOT NULL DEFAULT 0,
             tx_hash          TEXT    NOT NULL,
+            from_address     TEXT,
+            to_address       TEXT,
             type             TEXT    NOT NULL,
             asset            TEXT    NOT NULL,
             contract_address TEXT,
             amount           TEXT    NOT NULL,
             source           TEXT    NOT NULL,
+            method_id        TEXT,
+            method_name      TEXT,
             UNIQUE (tx_hash, wallet_id, source)
         );
-        INSERT INTO transactions SELECT * FROM _transactions_old;
+        INSERT INTO transactions
+          (id, wallet_id, chain, timestamp, block_number, tx_hash,
+           from_address, to_address, type, asset, contract_address,
+           amount, source, method_id, method_name)
+        SELECT
+           id, wallet_id, chain, timestamp, block_number, tx_hash,
+           NULL, NULL, type, asset, contract_address, amount, source, NULL, NULL
+        FROM _transactions_old;
         DROP TABLE _transactions_old;
     """)
+
+
+def _migrate_tx_method_columns(conn: sqlite3.Connection) -> None:
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    if not cols:
+        return
+    if "method_id" not in cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN method_id TEXT")
+    if "method_name" not in cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN method_name TEXT")
+
+
+def _migrate_tx_address_columns(conn: sqlite3.Connection) -> None:
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+    if not cols:
+        return
+    if "from_address" not in cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN from_address TEXT")
+    if "to_address" not in cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN to_address TEXT")
 
 
 def init_db() -> None:
@@ -177,6 +212,8 @@ def init_db() -> None:
         conn.executescript(SCHEMA_SQL)
         _migrate_wallet_chain_state(conn)
         _migrate_tx_dedup_constraint(conn)
+        _migrate_tx_address_columns(conn)
+        _migrate_tx_method_columns(conn)
         conn.executescript(INDICES_SQL)
         conn.commit()
     finally:

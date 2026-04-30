@@ -57,11 +57,11 @@ def _reset_inbox() -> None:
 wallets = _get_wallets()
 
 if not wallets:
-    st.warning("Geen wallets gevonden. Voeg eerst wallets toe via **Wallets**.")
+    st.warning("Geen EVM wallets gevonden. Voeg eerst wallets toe via **EVM wallets**.")
     st.stop()
 
-st.subheader("1. Wallets")
-st.caption(f"{len(wallets)} wallet(s) — {', '.join(CHAINS.keys())} worden gecheckt.")
+st.subheader("1. EVM wallets")
+st.caption(f"{len(wallets)} EVM wallet(s) — {', '.join(CHAINS.keys())} worden gecheckt.")
 for w in wallets:
     st.caption(f"• **{w['name']}** — `{w['address']}`")
 

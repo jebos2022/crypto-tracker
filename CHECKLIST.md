@@ -85,23 +85,23 @@ Volgorde van werken: kickoff (Opus) per fase → blokken sequentieel → fase-re
 ## Fase 2 — Ledger-pagina (transactiehistorie)
 
 ### Kickoff (Opus)
-- [ ] Scope-analyse + vragenlijst
-- [ ] Blok-uitwerking bevestigd
+- [x] Scope-analyse + vragenlijst
+- [x] Blok-uitwerking bevestigd
 
 ### Blok 2.A — Pagina "Transacties"
 **Branch:** feature/2-a-ledger-page — **Model:** Sonnet
-- [ ] Filter wallet (incl. "alle"), chain, token
-- [ ] Sorteer op datum (default desc)
-- [ ] Kolommen: datum, type, bedrag, asset, tx_hash (kort), bron-endpoint
-- [ ] Etherscan-link per rij
-- [ ] Test: happy / leeg / regressie
+- [x] Filter wallet (incl. "alle"), chain, token
+- [x] Sorteer op datum (default desc)
+- [x] Kolommen: datum, type, bedrag, asset, tx_hash (kort), bron-endpoint
+- [x] Etherscan-link per rij
+- [x] Test: happy / leeg / regressie
 - [ ] /review groen → merge
 
 ### Blok 2.B — Export naar CSV
 **Branch:** feature/2-b-ledger-export — **Model:** Haiku
-- [ ] Download-knop levert CSV met huidige filter
-- [ ] Bestandsnaam bevat wallet/token/datum
-- [ ] Test: happy / lege filter / regressie
+- [x] Download-knop levert CSV met huidige filter
+- [x] Bestandsnaam bevat wallet/token/datum
+- [x] Test: happy / lege filter / regressie
 - [ ] /review groen → merge
 
 ### Fase 2 afgerond

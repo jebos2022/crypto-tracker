@@ -2,8 +2,11 @@ import streamlit as st
 from core.db import get_connection
 from core.backup import create_backup
 
-st.title("Wallets")
-st.caption("Beheer je wallet adressen. Alle wallets worden gebruikt bij het ophalen van transacties.")
+st.title("EVM wallets")
+st.caption(
+    "Beheer je EVM-walletadressen. Deze adressen worden opgehaald op Ethereum, "
+    "Arbitrum, Base, Optimism, Polygon en BEAM."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +59,7 @@ def _delete_wallet(wallet_id: int) -> None:
 wallets = _get_wallets()
 
 if wallets:
-    st.subheader(f"{len(wallets)} wallet(s)")
+    st.subheader(f"{len(wallets)} EVM wallet(s)")
     for w in wallets:
         with st.container(border=True):
             c1, c2, c3 = st.columns([2, 6, 1])
@@ -79,10 +82,10 @@ if wallets:
                     st.session_state[f"confirm_del_{w['id']}"] = True
                     st.rerun()
 else:
-    st.info("Nog geen wallets. Voeg hieronder je eerste wallet toe.")
+    st.info("Nog geen EVM wallets. Voeg hieronder je eerste wallet toe.")
 
 st.divider()
-st.subheader("Wallet toevoegen")
+st.subheader("EVM wallet toevoegen")
 
 with st.form("add_wallet_form", clear_on_submit=True):
     col_name, col_addr = st.columns([2, 5])
