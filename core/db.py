@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     contract_address TEXT,
     amount           TEXT    NOT NULL,
     source           TEXT    NOT NULL,
-    UNIQUE (tx_hash, wallet_id)
+    UNIQUE (tx_hash, wallet_id, source)
 );
 
 CREATE TABLE IF NOT EXISTS token_review (
@@ -130,11 +130,53 @@ def _migrate_wallet_chain_state(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE _wallet_chain_state_old")
 
 
+def _migrate_tx_dedup_constraint(conn: sqlite3.Connection) -> None:
+    """
+    Change UNIQUE (tx_hash, wallet_id) → UNIQUE (tx_hash, wallet_id, source).
+    Idempotent — safe to run on every init_db().
+
+    Root cause: a transaction that moves both ETH and tokens (e.g. "buy tokens
+    with ETH") produces a tokentx row AND a txlist row with the same outer
+    tx_hash. The old 2-column constraint blocks the txlist TRANSFER_OUT because
+    the tx_hash is already occupied by the tokentx row. Fix: allow the same
+    tx_hash per wallet as long as the source differs.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='transactions'"
+    ).fetchone()
+    if not row:
+        return  # table not yet created — SCHEMA_SQL will create it correctly
+    table_sql = row[0] or ""
+    if "wallet_id, source" in table_sql:
+        return  # already migrated
+
+    conn.execute("ALTER TABLE transactions RENAME TO _transactions_old")
+    conn.executescript("""
+        CREATE TABLE transactions (
+            id               TEXT    PRIMARY KEY,
+            wallet_id        INTEGER NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
+            chain            TEXT    NOT NULL,
+            timestamp        TEXT    NOT NULL,
+            block_number     INTEGER NOT NULL DEFAULT 0,
+            tx_hash          TEXT    NOT NULL,
+            type             TEXT    NOT NULL,
+            asset            TEXT    NOT NULL,
+            contract_address TEXT,
+            amount           TEXT    NOT NULL,
+            source           TEXT    NOT NULL,
+            UNIQUE (tx_hash, wallet_id, source)
+        );
+        INSERT INTO transactions SELECT * FROM _transactions_old;
+        DROP TABLE _transactions_old;
+    """)
+
+
 def init_db() -> None:
     conn = get_connection()
     try:
         conn.executescript(SCHEMA_SQL)
         _migrate_wallet_chain_state(conn)
+        _migrate_tx_dedup_constraint(conn)
         conn.executescript(INDICES_SQL)
         conn.commit()
     finally:
