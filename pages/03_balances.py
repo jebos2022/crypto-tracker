@@ -6,12 +6,15 @@ import pandas as pd
 from core.db import get_connection
 from core.models import CHAINS, format_token, BRIDGE_OUT, BRIDGE_IN
 from core.balance_check import verify_balances
+from core.token_review import sync_staking_wrappers
 
 st.title("Balansen")
 st.caption("Som van alle transacties per token per wallet. Alleen tokens waarvoor 'Importeren' aangevinkt is.")
 
-# Bedragen kleiner dan dit worden als nul beschouwd (float-afrondingsruis)
 ZERO_THRESHOLD = Decimal("0.000001")
+
+# Ensure staked wrapper tokens (xOPN, stPEAR) are accepted when their underlying is.
+sync_staking_wrappers()
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +57,6 @@ def _get_balances(wallet_id: int | None = None) -> list[dict]:
     finally:
         conn.close()
 
-    # Sum per (wallet, chain, asset) using Decimal
     totals: dict[tuple, Decimal] = {}
     for r in rows:
         key = (r["wallet"], r["chain"], r["asset"])
@@ -67,11 +69,6 @@ def _get_balances(wallet_id: int | None = None) -> list[dict]:
 
 
 def _get_bridge_summary(wallet_id: int | None = None) -> dict[tuple, dict]:
-    """
-    Sum BRIDGE_OUT/IN per (wallet, chain, asset). Used to explain negative
-    balances caused by bridges to chains we don't track.
-    Returns: {(wallet, chain, asset): {"out": Decimal, "in": Decimal, "count": int}}
-    """
     conn = get_connection()
     try:
         sql = """
@@ -94,7 +91,7 @@ def _get_bridge_summary(wallet_id: int | None = None) -> dict[tuple, dict]:
         entry = summary.setdefault(key, {"out": Decimal("0"), "in": Decimal("0"), "count": 0})
         amt = Decimal(r["amount"])
         if r["type"] == BRIDGE_OUT:
-            entry["out"] += amt  # already negative
+            entry["out"] += amt
         else:
             entry["in"] += amt
         entry["count"] += 1
@@ -111,7 +108,6 @@ if not wallets:
     st.info("Nog geen wallets. Voeg ze toe via **Wallets**.")
     st.stop()
 
-# Filters
 col_sel, col_toggle = st.columns([3, 1])
 options = ["Alle wallets"] + [w["name"] for w in wallets]
 selected_label = col_sel.selectbox("Wallet", options, key="bal_wallet_sel")
@@ -120,7 +116,7 @@ selected_id = None if selected_label == "Alle wallets" else next(
 )
 hide_zero = col_toggle.checkbox("Verberg nullen", value=True, key="hide_zero")
 
-balances = _get_balances(selected_id)
+balances      = _get_balances(selected_id)
 bridge_summary = _get_bridge_summary(selected_id)
 
 if not balances:
@@ -130,26 +126,27 @@ if not balances:
 # Build display rows
 rows = []
 negatives = 0
-bridge_explained = 0  # negatives where outflow ≈ bridge-out
+bridge_explained = 0
+
 for b in balances:
     bal = b["balance"]
-    # Treat near-zero as exactly zero (floating-point rounding noise)
+
     if abs(bal) < ZERO_THRESHOLD:
         bal = Decimal("0")
     is_neg = bal < 0
-    bridged_out = Decimal("0")
+
+    bridged_out    = Decimal("0")
     is_bridge_caused = False
     if is_neg:
         negatives += 1
         key = (b["wallet"], b["chain"], b["asset"])
         br = bridge_summary.get(key)
         if br:
-            # br["out"] is negative; compare absolute values
-            bridged_out = -br["out"]  # positive number
-            # If the bridge outflow accounts for most of the deficit, mark it
+            bridged_out = -br["out"]
             if bridged_out >= -bal - ZERO_THRESHOLD:
                 is_bridge_caused = True
                 bridge_explained += 1
+
     rows.append({
         "":       "🌉" if is_bridge_caused else ("⚠️" if is_neg else ""),
         "Wallet": b["wallet"],
@@ -159,7 +156,6 @@ for b in balances:
         "_zero":  bal == 0,
         "_neg":   is_neg,
         "_bridge": is_bridge_caused,
-        "_bridged_out": bridged_out,
     })
 
 if hide_zero:
@@ -168,7 +164,8 @@ if hide_zero:
 if negatives:
     if bridge_explained:
         unexplained = negatives - bridge_explained
-        msg = f"{negatives} token(s) met een negatieve balans — waarvan {bridge_explained} verklaarbaar door bridge-uitgaande transfers (🌉)"
+        msg = (f"{negatives} token(s) met een negatieve balans — "
+               f"waarvan {bridge_explained} verklaarbaar door bridge-uitgaande transfers (🌉)")
         if unexplained:
             msg += f", {unexplained} mogelijk door ontbrekende transacties (⚠️)"
         msg += "."
@@ -177,7 +174,7 @@ if negatives:
         st.warning(f"{negatives} token(s) met een negatieve balans — er ontbreken waarschijnlijk transacties.")
 
 total_tokens = len(rows)
-positive = sum(1 for r in rows if not r["_neg"] and not r["_zero"])
+positive     = sum(1 for r in rows if not r["_neg"] and not r["_zero"])
 
 c1, c2, c3 = st.columns(3)
 c1.metric("Tokens", total_tokens)
@@ -203,14 +200,12 @@ st.dataframe(
 
 if negatives:
     st.caption(
-        "🌉 = saldo negatief door bridge-uitgaande transfers naar een andere chain. "
-        "Voeg de bestemmings-chain toe aan de import om de inkomende kant ook te zien.  \n"
-        "⚠️ = negatief om een andere reden — waarschijnlijk ontbrekende transacties "
-        "(CEX-transfers, niet-geïmporteerde chains, of nog onbekende bridge-contracten)."
+        "🌉 = saldo negatief door bridge-uitgaande transfers.  "
+        "⚠️ = negatief door ontbrekende transacties."
     )
 
 # ---------------------------------------------------------------------------
-# On-chain verificatie — vergelijk computed saldi met `tokenbalance`/`balance`
+# On-chain verificatie
 # ---------------------------------------------------------------------------
 st.divider()
 st.subheader("On-chain verificatie")
@@ -238,7 +233,6 @@ if verify_clicked:
 
 check_rows = st.session_state.get("balance_check")
 if check_rows:
-    # Filter to currently selected wallet (session_state may hold a previous run)
     if selected_id is not None:
         sel_name = next(w["name"] for w in wallets if w["id"] == selected_id)
         visible = [r for r in check_rows if r.wallet == sel_name]
@@ -246,24 +240,24 @@ if check_rows:
         visible = list(check_rows)
 
     mismatches = 0
-    errors_n = 0
+    errors_n   = 0
     unknown_dec = 0
     check_table = []
     for r in visible:
         if r.error:
             errors_n += 1
-            delta_str = "—"
+            delta_str   = "—"
             onchain_str = "—"
             symbol = "❌"
         elif not r.decimals_known:
             unknown_dec += 1
-            delta_str = "(decimals onbekend — re-fetch)"
+            delta_str   = "(decimals onbekend — re-fetch)"
             onchain_str = format_token(r.onchain, decimals=0)
             symbol = "❓"
         else:
             d = r.delta or Decimal("0")
             if abs(d) < ZERO_THRESHOLD:
-                symbol = "✅"
+                symbol    = "✅"
                 delta_str = format_token(Decimal("0"))
             else:
                 symbol = "⚠️"
@@ -298,18 +292,20 @@ if check_rows:
         "❌ = API-call mislukt (zie Detail)"
     )
 
-# Bridge activity expander — shows all wallets/chains/assets with bridge activity
+# ---------------------------------------------------------------------------
+# Bridge activity expander
+# ---------------------------------------------------------------------------
 if bridge_summary:
     with st.expander(f"Bridge-activiteit ({len(bridge_summary)} regel(s))", expanded=False):
         bridge_rows = []
         for (w, ch, asset), agg in sorted(bridge_summary.items()):
             bridge_rows.append({
-                "Wallet": w,
-                "Chain":  CHAINS.get(ch, {}).get("label", ch),
-                "Token":  asset,
-                "Uitgaand (bridge)": format_token(-agg["out"]),
-                "Inkomend (bridge)": format_token(agg["in"]),
-                "Aantal": agg["count"],
+                "Wallet":              w,
+                "Chain":               CHAINS.get(ch, {}).get("label", ch),
+                "Token":               asset,
+                "Uitgaand (bridge)":   format_token(-agg["out"]),
+                "Inkomend (bridge)":   format_token(agg["in"]),
+                "Aantal":              agg["count"],
             })
         st.dataframe(
             pd.DataFrame(bridge_rows),

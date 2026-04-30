@@ -121,12 +121,42 @@ def set_token_accepted(wallet_id: int, chain: str, asset: str, accepted: bool) -
 
 
 def set_token_accepted_global(chain: str, asset: str, accepted: bool) -> None:
+    from core.models import STAKED_TOKENS
     conn = get_connection()
     try:
         conn.execute(
             "UPDATE token_review SET accepted = ? WHERE chain = ? AND asset = ?",
             (1 if accepted else 0, chain, asset),
         )
+        if accepted:
+            # Cascade: auto-accept staked wrappers of this underlying token.
+            for staked_asset, info in STAKED_TOKENS.get(chain, {}).items():
+                if info["underlying"] == asset:
+                    conn.execute(
+                        "UPDATE token_review SET accepted = 1 WHERE chain = ? AND asset = ?",
+                        (chain, staked_asset),
+                    )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def sync_staking_wrappers() -> None:
+    """Ensure staked wrapper tokens are accepted whenever their underlying is accepted."""
+    from core.models import STAKED_TOKENS
+    conn = get_connection()
+    try:
+        for chain, tokens in STAKED_TOKENS.items():
+            for staked_asset, info in tokens.items():
+                conn.execute(
+                    """UPDATE token_review SET accepted = 1
+                       WHERE chain = ? AND asset = ?
+                         AND EXISTS (
+                             SELECT 1 FROM token_review
+                             WHERE chain = ? AND asset = ? AND accepted = 1
+                         )""",
+                    (chain, staked_asset, chain, info["underlying"]),
+                )
         conn.commit()
     finally:
         conn.close()
@@ -193,6 +223,8 @@ def accept_non_scams() -> tuple[int, int]:
                 )
                 accepted += 1
         conn.commit()
+        # Cascade: auto-accept staked wrappers whose underlying was just accepted.
+        sync_staking_wrappers()
         return accepted, rejected
     finally:
         conn.close()

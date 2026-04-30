@@ -90,6 +90,36 @@ def is_bridge_contract(chain: str, address: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Staked token registry — maps staking wrapper tokens to their underlying.
+# Used to fold xOPN → OPN, stPEAR → PEAR on the balances page.
+# The exchange rate is fetched live: underlying_in_vault / staked_total_supply.
+# All addresses must be lowercase.
+# ---------------------------------------------------------------------------
+
+STAKED_TOKENS: dict[str, dict[str, dict]] = {
+    "ethereum": {
+        "xOPN": {
+            "underlying":            "OPN",
+            "underlying_contract":   "0xc28eb2250d1ae32c7e74cfb6d6b86afc9beb6509",
+            "staking_contract":      "0x686e8500b6be8812eb198aabbbfa14c95c03fc88",
+        },
+    },
+    "arbitrum": {
+        "stPEAR": {
+            "underlying":            "PEAR",
+            "underlying_contract":   "0x3212dc0f8c834e4de893532d27cc9b6001684db0",
+            "staking_contract":      "0xce3be5204017bb1bd279937f92df09fd7f539b92",
+        },
+    },
+}
+
+
+def get_staked_info(chain: str, asset: str) -> dict | None:
+    """Return staking info if asset is a known staking wrapper, else None."""
+    return STAKED_TOKENS.get(chain, {}).get(asset)
+
+
+# ---------------------------------------------------------------------------
 # Transaction types
 # ---------------------------------------------------------------------------
 

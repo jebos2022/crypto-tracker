@@ -7,15 +7,21 @@ import uuid
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from core import api
 from core.db import get_connection
 from core.models import (
     CHAINS, WETH_CONTRACTS,
-    TRANSFER_IN, TRANSFER_OUT, BRIDGE_IN, BRIDGE_OUT, GAS_FEE,
-    is_bridge_contract,
+    TRANSFER_IN,
+    get_staked_info,
     to_decimal, to_db,
+)
+from core.parsers import (
+    _unix_to_iso,
+    _parse_tokentx_row,
+    _parse_txlist_row,
+    _parse_internal_row,
 )
 
 
@@ -114,163 +120,6 @@ def _known_hashes(wallet_id: int) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Row parsers
-# ---------------------------------------------------------------------------
-
-def _unix_to_iso(ts_str: str) -> str:
-    try:
-        dt = datetime.fromtimestamp(int(ts_str), tz=timezone.utc)
-        return dt.strftime("%Y-%m-%dT%H:%M:%S")
-    except (ValueError, OSError):
-        return ""
-
-
-def _parse_tokentx_row(raw: dict, wallet: str, chain: str) -> dict | None:
-    from_addr = raw.get("from", "").lower()
-    to_addr   = raw.get("to",   "").lower()
-
-    if from_addr != wallet and to_addr != wallet:
-        return None
-
-    decimals = int(raw.get("tokenDecimal", "18") or "18")
-    try:
-        amount_raw = Decimal(raw.get("value", "0")) / (Decimal("10") ** decimals)
-    except (InvalidOperation, ValueError):
-        return None
-
-    is_inflow = (to_addr == wallet)
-    counterparty = from_addr if is_inflow else to_addr
-    bridge_name = is_bridge_contract(chain, counterparty)
-
-    if bridge_name:
-        direction = BRIDGE_IN if is_inflow else BRIDGE_OUT
-    else:
-        direction = TRANSFER_IN if is_inflow else TRANSFER_OUT
-    signed = abs(amount_raw) if is_inflow else -abs(amount_raw)
-
-    symbol   = raw.get("tokenSymbol", "").strip()
-    contract = raw.get("contractAddress", "").lower() or None
-
-    # ERC-20 token whose symbol matches the chain's native token (e.g. an "ETH"
-    # vault token on Arbitrum). Keep it separate from native ETH by tagging it
-    # with the first 6 chars of its contract address.
-    if contract and symbol == CHAINS[chain]["native"]:
-        symbol = f"{symbol}-{contract[:6]}"
-
-    return {
-        "id":               str(uuid.uuid4()),
-        "chain":            chain,
-        "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
-        "block_number":     int(raw.get("blockNumber", "0") or "0"),
-        "tx_hash":          raw.get("hash", ""),
-        "type":             direction,
-        "asset":            symbol,
-        "contract_address": contract,
-        "amount":           to_db(signed),
-        "source":           "tokentx",
-    }
-
-
-def _parse_txlist_row(raw: dict, wallet: str, chain: str) -> list[dict]:
-    """One txlist row may produce up to two DB rows: value transfer + gas fee."""
-    native = CHAINS[chain]["native"]
-    from_addr = raw.get("from", "").lower()
-    to_addr   = raw.get("to",   "").lower()
-    is_error  = raw.get("isError", "0") == "1"
-    outer_hash = raw.get("hash", "")
-    block_number = int(raw.get("blockNumber", "0") or "0")
-    ts = _unix_to_iso(raw.get("timeStamp", "0"))
-
-    rows: list[dict] = []
-
-    # Value transfer — only for successful transactions
-    if not is_error:
-        value_wei = to_decimal(raw.get("value", "0"))
-        if value_wei > 0 and (from_addr == wallet or to_addr == wallet):
-            is_inflow = (to_addr == wallet)
-            counterparty = from_addr if is_inflow else to_addr
-            if is_bridge_contract(chain, counterparty):
-                direction = BRIDGE_IN if is_inflow else BRIDGE_OUT
-            else:
-                direction = TRANSFER_IN if is_inflow else TRANSFER_OUT
-            amount_eth = value_wei / Decimal("10") ** 18
-            signed = abs(amount_eth) if is_inflow else -abs(amount_eth)
-            rows.append({
-                "id":               str(uuid.uuid4()),
-                "chain":            chain,
-                "timestamp":        ts,
-                "block_number":     block_number,
-                "tx_hash":          outer_hash,
-                "type":             direction,
-                "asset":            native,
-                "contract_address": None,
-                "amount":           to_db(signed),
-                "source":           "txlist",
-            })
-
-    # Gas fee — wallet is sender, regardless of success/failure
-    if from_addr == wallet:
-        gas_used  = to_decimal(raw.get("gasUsed",  "0"))
-        gas_price = to_decimal(raw.get("gasPrice", "0"))
-        fee = (gas_used * gas_price) / Decimal("10") ** 18
-        if fee > 0:
-            rows.append({
-                "id":               str(uuid.uuid4()),
-                "chain":            chain,
-                "timestamp":        ts,
-                "block_number":     block_number,
-                "tx_hash":          outer_hash + "_fee",
-                "type":             GAS_FEE,
-                "asset":            native,
-                "contract_address": None,
-                "amount":           to_db(-fee),
-                "source":           "txlist",
-            })
-
-    return rows
-
-
-def _parse_internal_row(raw: dict, wallet: str, chain: str, idx: int) -> dict | None:
-    """Internal native transfer (DEX swap return, unstake payout, etc.)."""
-    if raw.get("isError", "0") == "1":
-        return None
-
-    value_wei = to_decimal(raw.get("value", "0"))
-    if value_wei == 0:
-        return None
-
-    from_addr = raw.get("from", "").lower()
-    to_addr   = raw.get("to",   "").lower()
-
-    if from_addr != wallet and to_addr != wallet:
-        return None
-
-    native = CHAINS[chain]["native"]
-    is_inflow = (to_addr == wallet)
-    counterparty = from_addr if is_inflow else to_addr
-    if is_bridge_contract(chain, counterparty):
-        direction = BRIDGE_IN if is_inflow else BRIDGE_OUT
-    else:
-        direction = TRANSFER_IN if is_inflow else TRANSFER_OUT
-    amount = value_wei / Decimal("10") ** 18
-    signed = abs(amount) if is_inflow else -abs(amount)
-    outer_hash = raw.get("hash", "")
-
-    return {
-        "id":               str(uuid.uuid4()),
-        "chain":            chain,
-        "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
-        "block_number":     int(raw.get("blockNumber", "0") or "0"),
-        "tx_hash":          f"{outer_hash}_int_{idx}" if outer_hash else f"_int_{idx}",
-        "type":             direction,
-        "asset":            native,
-        "contract_address": None,
-        "amount":           to_db(signed),
-        "source":           "txlistinternal",
-    }
-
-
-# ---------------------------------------------------------------------------
 # Persist helpers
 # ---------------------------------------------------------------------------
 
@@ -305,14 +154,34 @@ def _insert_rows(rows: list[dict], wallet_id: int) -> int:
 
 
 def _upsert_token_review(wallet_id: int, chain: str, asset: str, contract_address: str | None) -> None:
-    """Add new token to review table if not already known (keeps existing accepted value)."""
+    """
+    Add token to review table if not already known.
+    Staked wrapper tokens (xOPN, stPEAR) are auto-accepted when their
+    underlying token (OPN, PEAR) is already accepted for this wallet+chain.
+    """
     conn = get_connection()
     try:
+        info = get_staked_info(chain, asset)
+        auto_accept = 0
+        if info:
+            row = conn.execute(
+                "SELECT accepted FROM token_review WHERE wallet_id = ? AND chain = ? AND asset = ?",
+                (wallet_id, chain, info["underlying"]),
+            ).fetchone()
+            if row and row["accepted"]:
+                auto_accept = 1
+
         conn.execute(
             "INSERT OR IGNORE INTO token_review (wallet_id, chain, asset, contract_address, accepted) "
-            "VALUES (?, ?, ?, ?, 0)",
-            (wallet_id, chain, asset, contract_address),
+            "VALUES (?, ?, ?, ?, ?)",
+            (wallet_id, chain, asset, contract_address, auto_accept),
         )
+        if auto_accept:
+            # Also flip existing rows that were not yet accepted.
+            conn.execute(
+                "UPDATE token_review SET accepted = 1 WHERE wallet_id = ? AND chain = ? AND asset = ?",
+                (wallet_id, chain, asset),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -387,7 +256,6 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
     # We suffix duplicate hashes (_dup1, _dup2, ...) so each event gets a unique key.
     try:
         tokentx_hash_counts: dict[str, int] = {}
-        # Buffer token-meta upserts to avoid hammering the DB inside the loop.
         meta_seen: dict[str, tuple[str, int]] = {}  # contract -> (symbol, decimals)
         for raw in api.fetch_tokentx(addr, chain, startblocks["tokentx"]):
             parsed = _parse_tokentx_row(raw, addr, chain)
@@ -398,7 +266,6 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
                 if count > 0:
                     parsed["tx_hash"] = f"{h}_dup{count}"
                 _add(parsed, "tokentx")
-                # Capture decimals + symbol for balance verification later.
                 contract = parsed.get("contract_address")
                 if contract and contract not in meta_seen:
                     try:
@@ -412,7 +279,6 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
         result.endpoint_errors["tokentx"] = f"{type(e).__name__}: {e}"
 
     # 2 — Native transfers + gas fees
-    # Also collect raw txlist rows for WETH reconciliation in step 4.
     txlist_rows: list[dict] = []
     try:
         for raw in api.fetch_txlist(addr, chain, startblocks["txlist"]):
@@ -438,12 +304,6 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
     # "ETH". Etherscan tokentx omits the Transfer(0x0, wallet, amount) mint event.
     # We detect missing mints by matching txlist deposits (to=contract, value>0)
     # against TRANSFER_INs in the buffer, and synthesise the missing rows.
-    #
-    # Covers two cases:
-    #   a) Known WETH contracts from WETH_CONTRACTS (symbol "WETH")
-    #   b) Any contract whose tokentx rows had their symbol renamed to "{native}-0x…"
-    #      because it collided with the native token symbol
-
     native = CHAINS[chain]["native"]
     wrap_contracts: dict[str, str] = {}  # contract_addr → asset symbol
 
@@ -488,10 +348,6 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
             }, "txlist")
 
     # 4b — Amount-based fallback for ETH-renamed tokens routed via a DEX/router.
-    # When ETH is sent to a router (not directly to the vault), the to-address check
-    # above doesn't fire. These vaults are 1:1 wrappers, so the ETH outflow amount
-    # equals the token deficit exactly. If there's exactly one txlist ETH outflow
-    # matching the deficit and no TRANSFER_IN exists yet, synthesise it.
     for contract_addr, sym in wrap_contracts.items():
         if sym == "WETH":
             continue
@@ -525,13 +381,10 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
     # Persist
     result.new_tx = _insert_rows(buffer, wallet_id)
 
-    # Update token_review for newly seen tokens
     for row in buffer:
         _upsert_token_review(wallet_id, chain, row["asset"], row.get("contract_address"))
 
-    # Save incremental state — but ONLY for endpoints that completed without
-    # error. A failed endpoint keeps its old cursor so the next fetch retries
-    # the same range instead of silently skipping the missed window.
+    # Save incremental state — but ONLY for endpoints that completed without error.
     for endpoint, max_block in result.max_block_per_endpoint.items():
         if endpoint in result.endpoint_errors:
             continue
@@ -574,9 +427,6 @@ def fetch_all(
             try:
                 result = fetch_wallet(wallet["id"], wallet["address"], chain)
                 summary.results.append(result)
-                # Surface per-endpoint failures (rate limit, server errors)
-                # so the UI can show them without scaring the user — the
-                # data is still partially fetched, just not the full window.
                 for endpoint, err in result.endpoint_errors.items():
                     summary.errors.append(
                         f"{label} / {wallet['name']} / {endpoint}: {err}"
@@ -590,4 +440,3 @@ def fetch_all(
         progress_fn(1.0, "Klaar")
 
     return summary
-

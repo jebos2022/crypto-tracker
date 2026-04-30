@@ -327,3 +327,15 @@ def fetch_token_balance(address: str, contract_address: str, chain: str) -> int:
         "tag":             "latest",
     }
     return int(_single_call(url, params))
+
+
+def fetch_token_supply(contract_address: str, chain: str) -> int:
+    """Total circulating supply of a token (raw, unscaled integer)."""
+    url = _api_url(chain)
+    params = {
+        **_api_params(chain),
+        "module":          "stats",
+        "action":          "tokensupply",
+        "contractaddress": contract_address.lower(),
+    }
+    return int(_single_call(url, params))
