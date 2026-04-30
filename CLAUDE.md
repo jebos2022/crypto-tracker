@@ -59,15 +59,27 @@ crypto-tracker/
 
 ## 3. Kritieke lessen (niet onderhandelen)
 
-### Les 1 — Dedup key = (tx_hash, wallet_id), NOOIT alleen tx_hash
+### Les 1 — Dedup key = (tx_hash, wallet_id, source)
 
-Dezelfde on-chain transactie verschijnt in de API-resultaten van meerdere wallets.
+Twee onafhankelijke problemen vereisen allebei een deel van deze sleutel:
+
+**Probleem A — cross-wallet:** Dezelfde on-chain transactie verschijnt in de API-resultaten van meerdere wallets.
 Als wallet A 100 USDC stuurt naar wallet B:
 - A's tokentx: from=A, to=B, tx_hash=H → outflow (-100)
 - B's tokentx: from=A, to=B, tx_hash=H → inflow (+100)
 
 Dedup op alleen tx_hash → B's inflow wordt overgeslagen → negatief saldo.
-**Oplossing:** `UNIQUE (tx_hash, wallet_id)` constraint in het schema. In geheugen: `set[tuple[str, int]]`.
+`wallet_id` in de sleutel lost dit op.
+
+**Probleem B — cross-source:** Dezelfde outer tx_hash verschijnt in zowel tokentx als txlist.
+Als wallet ETH koopt via Uniswap (ETH uit, token in):
+- tokentx: tx_hash=H, asset=TOKEN, TRANSFER_IN → opgeslagen
+- txlist: tx_hash=H, asset=ETH, TRANSFER_OUT → geblokkeerd zonder `source` in sleutel
+
+Dedup op alleen (tx_hash, wallet_id) → de ETH-outflow wordt overgeslagen → saldo 96 ETH te hoog.
+`source` in de sleutel lost dit op.
+
+**Oplossing:** `UNIQUE (tx_hash, wallet_id, source)` in het schema. In geheugen: `set[tuple[str, str]]` (tx_hash, source).
 
 ### Les 2 — Altijd drie endpoints per wallet+chain
 

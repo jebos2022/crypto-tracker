@@ -18,9 +18,11 @@ Important is in elk geval:
   zowel in geheugen als in DB. Kijk specifiek naar `float()`-casts,
   `+`/`-`/`*`/`/` op niet-Decimal numerieken die een geldbedrag voorstellen,
   en `json.loads()` resultaten die zonder conversie in een Decimal-context belanden.
-- **Dedup-bug op tx_hash zonder wallet_id.** De UNIQUE constraint én alle
-  in-memory dedup-sets moeten `(tx_hash, wallet_id)` als sleutel gebruiken.
-  Een dedup op alleen `tx_hash` veroorzaakt verloren inflows bij wallet→wallet transfers.
+- **Dedup-bug op onvolledige sleutel.** De UNIQUE constraint én alle
+  in-memory dedup-sets moeten `(tx_hash, wallet_id, source)` als sleutel gebruiken.
+  Alleen `tx_hash` → verloren inflows bij wallet→wallet transfers.
+  Alleen `(tx_hash, wallet_id)` → verloren ETH-outflows wanneer dezelfde outer tx_hash
+  ook in tokentx staat (bijv. "koop tokens met ETH" via Uniswap).
 - **Stille data-loss bij API-fouten.** Rate-limit responses, timeouts, of
   partial pagination mag nooit `last_block` advancen alsof de data compleet was.
   Zie `core/api.py` `_classify` als referentie-implementatie.

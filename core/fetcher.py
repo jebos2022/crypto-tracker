@@ -102,15 +102,15 @@ def _save_last_block(wallet_id: int, chain: str, endpoint: str, last_block: int)
         conn.close()
 
 
-def _known_hashes(wallet_id: int) -> set[str]:
-    """Return tx_hashes already in DB for this wallet (dedup key: tx_hash + wallet_id)."""
+def _known_hashes(wallet_id: int) -> set[tuple[str, str]]:
+    """Return (tx_hash, source) pairs already in DB for this wallet."""
     conn = get_connection()
     try:
         rows = conn.execute(
-            "SELECT tx_hash FROM transactions WHERE wallet_id = ? AND tx_hash IS NOT NULL",
+            "SELECT tx_hash, source FROM transactions WHERE wallet_id = ? AND tx_hash IS NOT NULL",
             (wallet_id,),
         ).fetchall()
-        return {r["tx_hash"] for r in rows}
+        return {(r["tx_hash"], r["source"]) for r in rows}
     finally:
         conn.close()
 
@@ -229,7 +229,8 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
 
     def _add(row: dict, endpoint: str) -> None:
         h = row.get("tx_hash", "")
-        if h and h in known:
+        key = (h, endpoint)
+        if h and key in known:
             result.skipped += 1
             return
         bn = row.get("block_number", 0)
@@ -238,7 +239,7 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
             result.max_block_per_endpoint[endpoint] = bn
         buffer.append(row)
         if h:
-            known.add(h)
+            known.add(key)
         result.tokens_seen.add(row["asset"])
 
     # Per-endpoint startblock — independent cursors.
