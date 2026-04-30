@@ -2,7 +2,7 @@ import re
 from collections import OrderedDict
 from datetime import date
 
-from core.models import CHAINS, STAKED_TOKENS, WETH_CONTRACTS, to_decimal
+from core.models import CHAINS, is_known_safe_token_contract, to_decimal
 from core.token_review import is_scam
 
 
@@ -22,24 +22,6 @@ KNOWN_ACTION_TARGETS: dict[str, dict[str, str]] = {
         "0x0000000000001ff3684f28c67538d4d072c22734": "0x Swap",
     },
 }
-
-KNOWN_TOKEN_CONTRACTS: set[tuple[str, str]] = {
-    ("ethereum", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),  # USDC
-    ("arbitrum", "0xaf88d065e77c8cc2239327c5edb3a432268e5831"),  # USDC
-    ("base", "0x833589fcd6edb6e08f4c7c32d4f71b54bdA02913".lower()),  # USDC
-    ("optimism", "0x0b2c639c533813f4aa9d7837caf62653d097ff85"),  # USDC
-    ("polygon", "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),  # USDC
-}
-KNOWN_TOKEN_CONTRACTS |= {
-    (chain, contract.lower())
-    for chain, contract in WETH_CONTRACTS.items()
-}
-KNOWN_TOKEN_CONTRACTS |= {
-    (chain, info["underlying_contract"].lower())
-    for chain, tokens in STAKED_TOKENS.items()
-    for info in tokens.values()
-}
-
 
 def normalize_tx_hash(tx_hash: str | None) -> str:
     """
@@ -166,13 +148,24 @@ def action_target_label(chain: str, address: str | None) -> str:
 
 
 def token_signal(row: dict) -> str:
+    status = row.get("review_status")
+    reason = row.get("review_reason")
+    if status == "safe":
+        return ""
+    if status == "scam":
+        return reason or "Scam-naam"
+    if status == "suspicious":
+        return reason or "Verdachte metadata"
+    if status == "unknown":
+        return reason or "Metadata ontbreekt"
+
     contract = (row.get("contract_address") or "").lower()
     if not contract:
         return ""
     asset = row.get("asset", "")
     if is_scam(asset):
         return "Scam-naam"
-    if (row.get("chain", ""), contract) in KNOWN_TOKEN_CONTRACTS:
+    if is_known_safe_token_contract(row.get("chain", ""), contract):
         return ""
     if row.get("has_metadata"):
         if not row.get("verified") and not row.get("has_website") and not row.get("has_social"):

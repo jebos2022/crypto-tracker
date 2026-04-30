@@ -119,6 +119,33 @@ def get_staked_info(chain: str, asset: str) -> dict | None:
     return STAKED_TOKENS.get(chain, {}).get(asset)
 
 
+# Contracts that are safe enough to auto-accept without tokeninfo enrichment.
+# Keep this deliberately small; everything else can still be accepted manually
+# from Token review after inspection.
+KNOWN_SAFE_TOKEN_CONTRACTS: set[tuple[str, str]] = {
+    ("ethereum", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),  # USDC
+    ("arbitrum", "0xaf88d065e77c8cc2239327c5edb3a432268e5831"),  # USDC
+    ("base", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),  # USDC
+    ("optimism", "0x0b2c639c533813f4aa9d7837caf62653d097ff85"),  # USDC
+    ("polygon", "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),  # USDC
+}
+KNOWN_SAFE_TOKEN_CONTRACTS |= {
+    (chain, contract.lower())
+    for chain, contract in WETH_CONTRACTS.items()
+}
+KNOWN_SAFE_TOKEN_CONTRACTS |= {
+    (chain, info["underlying_contract"].lower())
+    for chain, tokens in STAKED_TOKENS.items()
+    for info in tokens.values()
+}
+
+
+def is_known_safe_token_contract(chain: str, contract_address: str | None) -> bool:
+    if not contract_address:
+        return False
+    return (chain, contract_address.lower()) in KNOWN_SAFE_TOKEN_CONTRACTS
+
+
 # ---------------------------------------------------------------------------
 # Transaction types
 # ---------------------------------------------------------------------------

@@ -18,6 +18,13 @@ from core.parsers import (
     _parse_txlist_row,
     _parse_internal_row,
 )
+from core.token_review import (
+    AUTO_DECISION,
+    USER_DECISION,
+    classify_token,
+    token_key,
+    utc_now,
+)
 from core.wrap_reconcile import synthesize_wrap_rows
 
 
@@ -164,25 +171,79 @@ def _upsert_token_review(wallet_id: int, chain: str, asset: str, contract_addres
     conn = get_connection()
     try:
         info = get_staked_info(chain, asset)
-        auto_accept = 0
+        classification = classify_token({
+            "chain": chain,
+            "asset": asset,
+            "contract_address": contract_address,
+        })
+        auto_accept = 1 if classification.accepted_by_default else 0
         if info:
             row = conn.execute(
-                "SELECT accepted FROM token_review WHERE wallet_id = ? AND chain = ? AND asset = ?",
-                (wallet_id, chain, info["underlying"]),
+                """
+                SELECT accepted FROM token_review
+                WHERE wallet_id = ?
+                  AND chain = ?
+                  AND (asset = ? OR token_key = ?)
+                """,
+                (wallet_id, chain, info["underlying"], info.get("underlying_contract", "").lower()),
             ).fetchone()
             if row and row["accepted"]:
                 auto_accept = 1
 
+        key = token_key(asset, contract_address)
+        now = utc_now()
         conn.execute(
-            "INSERT OR IGNORE INTO token_review (wallet_id, chain, asset, contract_address, accepted) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (wallet_id, chain, asset, contract_address, auto_accept),
+            """
+            INSERT INTO token_review
+                (wallet_id, chain, token_key, asset, contract_address, accepted,
+                 review_status, review_reason, decision_source, decision_updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wallet_id, chain, token_key) DO UPDATE SET
+                asset = excluded.asset,
+                contract_address = excluded.contract_address,
+                review_status = excluded.review_status,
+                review_reason = excluded.review_reason,
+                accepted = CASE
+                    WHEN token_review.decision_source = ? THEN token_review.accepted
+                    ELSE excluded.accepted
+                END,
+                decision_source = CASE
+                    WHEN token_review.decision_source = ? THEN token_review.decision_source
+                    ELSE excluded.decision_source
+                END,
+                decision_updated_at = CASE
+                    WHEN token_review.decision_source = ? THEN token_review.decision_updated_at
+                    ELSE excluded.decision_updated_at
+                END
+            """,
+            (
+                wallet_id,
+                chain,
+                key,
+                asset,
+                contract_address.lower() if contract_address else None,
+                auto_accept,
+                classification.status,
+                classification.reason,
+                AUTO_DECISION,
+                now,
+                USER_DECISION,
+                USER_DECISION,
+                USER_DECISION,
+            ),
         )
         if auto_accept:
             # Also flip existing rows that were not yet accepted.
             conn.execute(
-                "UPDATE token_review SET accepted = 1 WHERE wallet_id = ? AND chain = ? AND asset = ?",
-                (wallet_id, chain, asset),
+                """
+                UPDATE token_review
+                SET accepted = 1, decision_source = ?, decision_updated_at = ?
+                WHERE wallet_id = ?
+                  AND chain = ?
+                  AND token_key = ?
+                  AND decision_source != ?
+                """,
+                (AUTO_DECISION, now, wallet_id, chain, key, USER_DECISION),
             )
         conn.commit()
     finally:

@@ -22,6 +22,7 @@ from decimal import Decimal
 from core import api
 from core.db import get_connection
 from core.models import CHAINS
+from core.token_review import token_key_sql, token_review_join_condition
 
 
 @dataclass
@@ -53,36 +54,40 @@ def _accepted_balances(wallet_id: int | None) -> list[dict]:
     """
     conn = get_connection()
     try:
-        sql = """
+        sql = f"""
             SELECT
                 w.name                         AS wallet,
                 w.id                           AS wallet_id,
                 w.address                      AS address,
                 t.chain                        AS chain,
                 t.asset                        AS asset,
+                {token_key_sql("t")}           AS token_key,
                 MAX(t.contract_address)        AS contract_address,
                 SUM(CAST(t.amount AS REAL))    AS rough_sum
             FROM transactions t
             JOIN wallets w ON w.id = t.wallet_id
             JOIN token_review tr
-              ON tr.wallet_id = t.wallet_id
-             AND tr.chain     = t.chain
-             AND tr.asset     = t.asset
+              ON {token_review_join_condition("t", "tr")}
             WHERE tr.accepted = 1
         """
         params: list = []
         if wallet_id is not None:
             sql += " AND t.wallet_id = ?"
             params.append(wallet_id)
-        sql += " GROUP BY w.id, t.chain, t.asset"
+        sql += " GROUP BY w.id, t.chain, token_key, t.asset"
         rough_rows = conn.execute(sql, params).fetchall()
 
         # Recompute the sum exactly with Decimal — REAL is only used to GROUP.
         result: list[dict] = []
         for r in rough_rows:
             tx_rows = conn.execute(
-                "SELECT amount FROM transactions WHERE wallet_id=? AND chain=? AND asset=?",
-                (r["wallet_id"], r["chain"], r["asset"]),
+                f"""
+                SELECT amount FROM transactions
+                WHERE wallet_id = ?
+                  AND chain = ?
+                  AND {token_key_sql("transactions")} = ?
+                """,
+                (r["wallet_id"], r["chain"], r["token_key"]),
             ).fetchall()
             exact = sum((Decimal(t["amount"]) for t in tx_rows), Decimal("0"))
             result.append({

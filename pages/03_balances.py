@@ -6,7 +6,7 @@ import pandas as pd
 from core.db import get_connection
 from core.models import CHAINS, format_token, BRIDGE_OUT, BRIDGE_IN
 from core.balance_check import verify_balances
-from core.token_review import sync_staking_wrappers
+from core.token_review import sync_staking_wrappers, token_review_join_condition
 
 st.title("Balansen")
 st.caption("Som van alle transacties per token per wallet. Alleen tokens waarvoor 'Importeren' aangevinkt is.")
@@ -34,7 +34,7 @@ def _get_balances(wallet_id: int | None = None) -> list[dict]:
     """Fetch raw transaction rows and sum in Python with Decimal for precision."""
     conn = get_connection()
     try:
-        sql = """
+        sql = f"""
             SELECT
                 w.name  AS wallet,
                 t.chain,
@@ -43,9 +43,7 @@ def _get_balances(wallet_id: int | None = None) -> list[dict]:
             FROM transactions t
             JOIN wallets w ON w.id = t.wallet_id
             JOIN token_review tr
-              ON tr.wallet_id = t.wallet_id
-             AND tr.chain     = t.chain
-             AND tr.asset     = t.asset
+              ON {token_review_join_condition("t", "tr")}
             WHERE tr.accepted = 1
         """
         params: list = []
@@ -71,11 +69,14 @@ def _get_balances(wallet_id: int | None = None) -> list[dict]:
 def _get_bridge_summary(wallet_id: int | None = None) -> dict[tuple, dict]:
     conn = get_connection()
     try:
-        sql = """
+        sql = f"""
             SELECT w.name AS wallet, t.chain, t.asset, t.type, t.amount
             FROM transactions t
             JOIN wallets w ON w.id = t.wallet_id
+            JOIN token_review tr
+              ON {token_review_join_condition("t", "tr")}
             WHERE t.type IN (?, ?)
+              AND tr.accepted = 1
         """
         params: list = [BRIDGE_OUT, BRIDGE_IN]
         if wallet_id is not None:

@@ -80,6 +80,12 @@ Volgorde van werken: kickoff (Opus) per fase → blokken sequentieel → fase-re
 - [x] `/ultrareview` op fase 1 (alle blokken samen)
 - [x] Alle 3 open issues gesloten
 
+### Nagekomen hardening — scam-token filtering
+- [x] Token review gebruikt contract-aware keys i.p.v. alleen ticker/symbool
+- [x] Scam/verdacht/onbekend/veilig status wordt automatisch opgeslagen
+- [x] Balansen en Transacties joinen op dezelfde contract-aware token_key
+- [x] Test: same-symbol scam / migratie / user override / regressie ledger
+
 ---
 
 ## Fase 2 — Ledger-pagina (transactiehistorie)

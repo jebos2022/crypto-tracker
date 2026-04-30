@@ -16,6 +16,7 @@ from core.ledger import (
 )
 from core.ledger_backfill import backfill_transaction_methods
 from core.models import CHAINS, format_token, to_decimal
+from core.token_review import token_review_join_condition
 
 
 st.title("Transacties")
@@ -80,13 +81,11 @@ def _get_wallets() -> list[dict]:
 
 
 def _get_chains(wallet_id: int | None) -> list[str]:
-    sql = """
+    sql = f"""
         SELECT DISTINCT t.chain
         FROM transactions t
         JOIN token_review tr
-          ON tr.wallet_id = t.wallet_id
-         AND tr.chain = t.chain
-         AND tr.asset = t.asset
+          ON {token_review_join_condition("t", "tr")}
         WHERE tr.accepted = 1
     """
     params: list = []
@@ -103,13 +102,11 @@ def _get_chains(wallet_id: int | None) -> list[str]:
 
 
 def _get_assets(wallet_id: int | None, chain: str | None) -> list[str]:
-    sql = """
+    sql = f"""
         SELECT DISTINCT t.asset
         FROM transactions t
         JOIN token_review tr
-          ON tr.wallet_id = t.wallet_id
-         AND tr.chain = t.chain
-         AND tr.asset = t.asset
+          ON {token_review_join_condition("t", "tr")}
         WHERE tr.accepted = 1
     """
     params: list = []
@@ -133,7 +130,7 @@ def _get_transactions(
     chain: str | None,
     descending: bool,
 ) -> list[dict]:
-    sql = """
+    sql = f"""
         SELECT
             w.name AS wallet,
             t.chain,
@@ -149,6 +146,8 @@ def _get_transactions(
             t.source,
             t.method_id,
             t.method_name,
+            tr.review_status,
+            tr.review_reason,
             MAX(tm.verified) AS verified,
             MAX(tm.holder_count) AS holder_count,
             MAX(tm.has_website) AS has_website,
@@ -157,9 +156,7 @@ def _get_transactions(
         FROM transactions t
         JOIN wallets w ON w.id = t.wallet_id
         JOIN token_review tr
-          ON tr.wallet_id = t.wallet_id
-         AND tr.chain = t.chain
-         AND tr.asset = t.asset
+          ON {token_review_join_condition("t", "tr")}
         LEFT JOIN token_metadata tm
           ON tm.chain = t.chain
          AND tm.contract_address = t.contract_address
@@ -177,7 +174,8 @@ def _get_transactions(
         GROUP BY
             t.id, w.name, t.chain, t.timestamp, t.block_number, t.tx_hash,
             t.from_address, t.to_address, t.type, t.asset, t.contract_address,
-            t.amount, t.source, t.method_id, t.method_name
+            t.amount, t.source, t.method_id, t.method_name,
+            tr.review_status, tr.review_reason
     """
     sql += f" ORDER BY t.timestamp {direction}, t.block_number {direction}, t.id {direction}"
 

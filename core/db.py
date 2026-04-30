@@ -43,10 +43,15 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE TABLE IF NOT EXISTS token_review (
     wallet_id        INTEGER NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
     chain            TEXT    NOT NULL,
+    token_key        TEXT    NOT NULL,
     asset            TEXT    NOT NULL,
     contract_address TEXT,
     accepted         INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (wallet_id, chain, asset)
+    review_status    TEXT    NOT NULL DEFAULT 'unknown',
+    review_reason    TEXT    NOT NULL DEFAULT 'Nog onvoldoende metadata',
+    decision_source  TEXT    NOT NULL DEFAULT 'auto',
+    decision_updated_at TEXT,
+    PRIMARY KEY (wallet_id, chain, token_key)
 );
 
 -- token_meta: per-contract decimals + symbol, harvested from tokentx rows.
@@ -79,6 +84,8 @@ CREATE INDEX IF NOT EXISTS idx_tx_chain     ON transactions(chain);
 CREATE INDEX IF NOT EXISTS idx_tx_asset     ON transactions(asset);
 CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp);
 CREATE INDEX IF NOT EXISTS idx_tx_hash      ON transactions(tx_hash);
+CREATE INDEX IF NOT EXISTS idx_token_review_asset ON token_review(chain, asset);
+CREATE INDEX IF NOT EXISTS idx_token_review_contract ON token_review(chain, contract_address);
 """
 
 
@@ -206,6 +213,84 @@ def _migrate_tx_address_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE transactions ADD COLUMN to_address TEXT")
 
 
+def _token_key_sql(table_alias: str = "t") -> str:
+    return (
+        f"CASE WHEN {table_alias}.contract_address IS NOT NULL "
+        f"AND {table_alias}.contract_address != '' "
+        f"THEN lower({table_alias}.contract_address) "
+        f"ELSE 'native:' || {table_alias}.asset END"
+    )
+
+
+def _create_token_review_table(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE token_review (
+            wallet_id        INTEGER NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
+            chain            TEXT    NOT NULL,
+            token_key        TEXT    NOT NULL,
+            asset            TEXT    NOT NULL,
+            contract_address TEXT,
+            accepted         INTEGER NOT NULL DEFAULT 0,
+            review_status    TEXT    NOT NULL DEFAULT 'unknown',
+            review_reason    TEXT    NOT NULL DEFAULT 'Nog onvoldoende metadata',
+            decision_source  TEXT    NOT NULL DEFAULT 'auto',
+            decision_updated_at TEXT,
+            PRIMARY KEY (wallet_id, chain, token_key)
+        );
+    """)
+
+
+def _migrate_token_review_contract_keys(conn: sqlite3.Connection) -> None:
+    """
+    Rebuild old asset-keyed token_review rows from transactions.
+
+    Existing token choices predate explicit user-vs-auto decisions, so they are
+    treated as provisional. core.token_review.reclassify_all_token_reviews()
+    applies the smart defaults after init_db() completes.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='token_review'"
+    ).fetchone()
+    if not row:
+        return
+
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(token_review)").fetchall()]
+    if "token_key" in cols:
+        for col, ddl in (
+            ("review_status", "ALTER TABLE token_review ADD COLUMN review_status TEXT NOT NULL DEFAULT 'unknown'"),
+            ("review_reason", "ALTER TABLE token_review ADD COLUMN review_reason TEXT NOT NULL DEFAULT 'Nog onvoldoende metadata'"),
+            ("decision_source", "ALTER TABLE token_review ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'auto'"),
+            ("decision_updated_at", "ALTER TABLE token_review ADD COLUMN decision_updated_at TEXT"),
+        ):
+            if col not in cols:
+                conn.execute(ddl)
+        return
+
+    conn.execute("ALTER TABLE token_review RENAME TO _token_review_old")
+    _create_token_review_table(conn)
+    token_key_expr = _token_key_sql("t")
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO token_review
+            (wallet_id, chain, token_key, asset, contract_address, accepted)
+        SELECT
+            t.wallet_id,
+            t.chain,
+            {token_key_expr} AS token_key,
+            MIN(t.asset) AS asset,
+            CASE
+                WHEN MAX(CASE WHEN t.contract_address IS NOT NULL AND t.contract_address != '' THEN 1 ELSE 0 END) = 1
+                THEN lower(MAX(t.contract_address))
+                ELSE NULL
+            END AS contract_address,
+            0 AS accepted
+        FROM transactions t
+        GROUP BY t.wallet_id, t.chain, token_key
+        """
+    )
+    conn.execute("DROP TABLE _token_review_old")
+
+
 def init_db() -> None:
     conn = get_connection()
     try:
@@ -214,10 +299,14 @@ def init_db() -> None:
         _migrate_tx_dedup_constraint(conn)
         _migrate_tx_address_columns(conn)
         _migrate_tx_method_columns(conn)
+        _migrate_token_review_contract_keys(conn)
         conn.executescript(INDICES_SQL)
         conn.commit()
     finally:
         conn.close()
+
+    from core.token_review import reclassify_all_token_reviews
+    reclassify_all_token_reviews()
 
 
 def reset_db() -> None:

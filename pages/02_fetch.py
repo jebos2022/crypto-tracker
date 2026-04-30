@@ -4,10 +4,11 @@ import pandas as pd
 from core.db import get_connection
 from core.models import CHAINS
 from core.fetcher import fetch_all
+from core.ledger import explorer_tx_url, normalize_tx_hash
 from core.token_review import (
     get_unique_tokens, save_token_selection_global,
-    accept_all_tokens, auto_reject_scams, accept_non_scams,
-    is_scam, is_suspicious_by_metadata, looks_like_ticker,
+    accept_recommended_tokens, auto_reject_scams, reject_all_tokens,
+    get_recent_token_transactions,
     enrich_tokens, count_enrichable_contracts,
 )
 
@@ -132,7 +133,7 @@ st.divider()
 st.subheader("3. Token review")
 st.caption(
     "Eén vinkje geldt voor **alle wallets** tegelijk. "
-    "Scam-tokens worden automatisch herkend en verborgen."
+    "Alle transacties blijven bewaard; alleen geaccepteerde tokens gaan mee naar balansen, ledger en export."
 )
 
 all_tokens = get_unique_tokens()
@@ -143,7 +144,6 @@ if not all_tokens:
     else:
         st.info("Nog geen transacties opgehaald. Klik op 'Haal alle transacties op' hierboven.")
 else:
-    # Verrijken via Etherscan tokeninfo
     n_contracts = count_enrichable_contracts()
     n_enriched = sum(1 for t in all_tokens if t.get("has_metadata"))
     enrich_col, enrich_status = st.columns([2, 3])
@@ -163,17 +163,10 @@ else:
     if n_enriched:
         enrich_status.caption(f"{n_enriched} van {n_contracts} tokens hebben metadata.")
 
-    # Split tokens into three groups
-    regex_scam = [t for t in all_tokens if is_scam(t["asset"])]
-    meta_susp   = [t for t in all_tokens if not is_scam(t["asset"]) and is_suspicious_by_metadata(t)]
-    clean       = [t for t in all_tokens if not is_scam(t["asset"]) and not is_suspicious_by_metadata(t)]
-
-    # Quick-action buttons
-    c1, c2, c3, c4 = st.columns(4)
-
-    if c1.button("Aanvinken excl. scams", use_container_width=True, key="accept_non_scams_btn", type="primary"):
-        accepted, rejected = accept_non_scams()
-        st.success(f"✅ {accepted} tokens aangevinkt, {rejected} afgewezen.")
+    c1, c2, c3 = st.columns(3)
+    if c1.button("Aanbevolen accepteren", use_container_width=True, key="accept_recommended_btn", type="primary"):
+        accepted, rejected = accept_recommended_tokens()
+        st.success(f"✅ {accepted} zeker-goed token(s) geaccepteerd, {rejected} onbekend/verdacht/scam afgewezen.")
         st.rerun()
 
     if c2.button("Scams afwijzen", use_container_width=True, key="reject_scams_btn"):
@@ -181,97 +174,120 @@ else:
         st.success(f"✅ {n} scam-entries afgewezen.")
         st.rerun()
 
-    if c3.button("Alles aanvinken", use_container_width=True, key="accept_all_btn"):
-        accept_all_tokens()
-        st.success("✅ Alles geselecteerd.")
-        st.rerun()
-
-    if c4.button("Alles uitvinken", use_container_width=True, key="reject_all_btn"):
-        from core.db import get_connection as _gc
-        conn = _gc()
-        conn.execute("UPDATE token_review SET accepted = 0")
-        conn.commit()
-        conn.close()
+    if c3.button("Alles uitvinken", use_container_width=True, key="reject_all_btn"):
+        reject_all_tokens()
         st.success("✅ Alles uitgevinkt.")
         st.rerun()
 
-    # Stats
-    n_accepted = sum(1 for t in clean if t["accepted"])
+    def _contract_label(contract: str | None) -> str:
+        if not contract:
+            return "native"
+        return f"{contract[:10]}…{contract[-6:]}"
+
+    def _status_label(status: str) -> str:
+        return {
+            "safe": "Zeker goed",
+            "unknown": "Onbekend",
+            "suspicious": "Verdacht",
+            "scam": "Scam",
+        }.get(status, status)
+
+    def _token_df(tokens: list[dict]) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "Status": _status_label(t["review_status"]),
+            "Chain": t["chain"],
+            "Token": t["asset"],
+            "Contract": _contract_label(t.get("contract_address")),
+            "Reden": t.get("review_reason") or "",
+            "Houders": t["holder_count"] if t.get("holder_count") is not None else "—",
+            "Wallets": t["wallet_count"],
+            "Bron": "handmatig" if t.get("decision_source") == "user" else "auto",
+            "Importeren": bool(t["accepted"]),
+        } for t in tokens])
+
+    def _tx_context_df(token: dict) -> pd.DataFrame:
+        rows = []
+        for row in get_recent_token_transactions(token["chain"], token["token_key"], limit=5):
+            rows.append({
+                "Datum": row["timestamp"].replace("T", " ")[:19],
+                "Wallet": row["wallet"],
+                "Bedrag": row["amount"],
+                "Asset": row["asset"],
+                "Contract": _contract_label(row.get("contract_address")),
+                "Tx": normalize_tx_hash(row["tx_hash"])[:12] + "…",
+                "Bron": row["source"],
+                "Explorer": explorer_tx_url(token["chain"], row["tx_hash"]),
+            })
+        return pd.DataFrame(rows)
+
+    groups = {
+        "safe": [t for t in all_tokens if t["review_status"] == "safe"],
+        "unknown": [t for t in all_tokens if t["review_status"] == "unknown"],
+        "suspicious": [t for t in all_tokens if t["review_status"] == "suspicious"],
+        "scam": [t for t in all_tokens if t["review_status"] == "scam"],
+    }
+
+    n_accepted = sum(1 for t in all_tokens if t["accepted"])
     st.caption(
-        f"{n_accepted} van {len(clean)} tokens aangevinkt  ·  "
-        f"{len(regex_scam)} scam (regex)  ·  "
-        f"{len(meta_susp)} verdacht (metadata)"
+        f"{n_accepted} van {len(all_tokens)} tokens geïmporteerd  ·  "
+        f"{len(groups['safe'])} zeker goed  ·  "
+        f"{len(groups['unknown'])} onbekend  ·  "
+        f"{len(groups['suspicious'])} verdacht  ·  "
+        f"{len(groups['scam'])} scam"
     )
 
-    if not clean:
-        st.info("Geen tokens gevonden na filters.")
-    else:
-        df = pd.DataFrame([{
-            "✅":         "✅" if t.get("verified") else "",
-            "Chain":      t["chain"],
-            "Token":      t["asset"],
-            "Houders":    t["holder_count"] if t.get("holder_count") is not None else "—",
-            "Wallets":    t["wallet_count"],
-            "Importeren": bool(t["accepted"]),
-        } for t in clean])
+    group_titles = {
+        "safe": "Zeker goed",
+        "unknown": "Onbekend — zelf controleren",
+        "suspicious": "Verdacht — metadata-signaal",
+        "scam": "Scam — naam/signaal",
+    }
 
-        edited = st.data_editor(
-            df,
-            column_config={
-                "✅":         st.column_config.TextColumn("", width="small", disabled=True),
-                "Chain":      st.column_config.TextColumn("Chain",   disabled=True),
-                "Token":      st.column_config.TextColumn("Token",   disabled=True),
-                "Houders":    st.column_config.TextColumn("Houders", disabled=True, width="small"),
-                "Wallets":    st.column_config.NumberColumn("Wallets", disabled=True, width="small"),
-                "Importeren": st.column_config.CheckboxColumn("Importeren"),
-            },
-            hide_index=True,
-            use_container_width=True,
-            key="token_editor",
-        )
-
-        if st.button("Selectie opslaan", type="primary", use_container_width=True, key="save_sel_btn"):
-            save_token_selection_global([
-                (t["chain"], t["asset"], bool(edited.iloc[i]["Importeren"]))
-                for i, t in enumerate(clean)
-            ])
-            accepted = int(edited["Importeren"].sum())
-            st.success(f"✅ Opgeslagen — {accepted} token(s) geselecteerd.")
-            st.rerun()
-
-    if meta_susp:
-        with st.expander(f"Verdachte tokens — geen verificatie of social ({len(meta_susp)})", expanded=False):
-            st.caption("Deze tokens hebben metadata maar geen Etherscan-verificatie, website of social media.")
-            susp_df = pd.DataFrame([{
-                "Chain":    t["chain"],
-                "Token":    t["asset"],
-                "Houders":  t["holder_count"] if t.get("holder_count") is not None else "—",
-                "Importeren": bool(t["accepted"]),
-            } for t in meta_susp])
-            edited_susp = st.data_editor(
-                susp_df,
+    for status in ("safe", "unknown", "suspicious", "scam"):
+        tokens = groups[status]
+        if not tokens:
+            continue
+        expanded = status in {"safe", "unknown"}
+        with st.expander(f"{group_titles[status]} ({len(tokens)})", expanded=expanded):
+            edited = st.data_editor(
+                _token_df(tokens),
                 column_config={
-                    "Chain":   st.column_config.TextColumn("Chain",  disabled=True),
-                    "Token":   st.column_config.TextColumn("Token",  disabled=True),
+                    "Status": st.column_config.TextColumn("Status", disabled=True),
+                    "Chain": st.column_config.TextColumn("Chain", disabled=True),
+                    "Token": st.column_config.TextColumn("Token", disabled=True),
+                    "Contract": st.column_config.TextColumn("Contract", disabled=True),
+                    "Reden": st.column_config.TextColumn("Reden", disabled=True),
                     "Houders": st.column_config.TextColumn("Houders", disabled=True, width="small"),
+                    "Wallets": st.column_config.NumberColumn("Wallets", disabled=True, width="small"),
+                    "Bron": st.column_config.TextColumn("Bron", disabled=True, width="small"),
                     "Importeren": st.column_config.CheckboxColumn("Importeren"),
                 },
                 hide_index=True,
                 use_container_width=True,
-                key="susp_editor",
+                key=f"{status}_editor",
             )
-            if st.button("Verdachte selectie opslaan", key="save_susp_btn"):
+
+            if st.button("Selectie opslaan", key=f"save_{status}_btn"):
                 save_token_selection_global([
-                    (t["chain"], t["asset"], bool(edited_susp.iloc[i]["Importeren"]))
-                    for i, t in enumerate(meta_susp)
+                    (t["chain"], t["token_key"], bool(edited.iloc[i]["Importeren"]))
+                    for i, t in enumerate(tokens)
                 ])
                 st.success("✅ Opgeslagen.")
                 st.rerun()
 
-    if regex_scam:
-        with st.expander(f"Verborgen scam-tokens — regex ({len(regex_scam)})", expanded=False):
-            st.dataframe(
-                pd.DataFrame([{"Chain": t["chain"], "Token": t["asset"]} for t in regex_scam]),
-                hide_index=True,
-                use_container_width=True,
-            )
+            if status != "safe":
+                st.caption("Laatste transacties per token, zodat je de herkomst snel kunt openen.")
+                for t in tokens:
+                    st.markdown(f"**{t['asset']}** · `{_contract_label(t.get('contract_address'))}` · {t.get('review_reason')}")
+                    tx_df = _tx_context_df(t)
+                    if tx_df.empty:
+                        st.caption("Geen transacties gevonden.")
+                    else:
+                        st.dataframe(
+                            tx_df,
+                            hide_index=True,
+                            use_container_width=True,
+                            column_config={
+                                "Explorer": st.column_config.LinkColumn("Explorer", display_text="Open"),
+                            },
+                        )
