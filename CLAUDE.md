@@ -1,6 +1,7 @@
 # CLAUDE.md — Crypto Portfolio Tracker
 
 Lees dit bestand aan het begin van elke sessie. Alle instructies hier overschrijven standaard gedrag.
+Volledige fase-/blok-indeling in [project_spec.md](project_spec.md). Review-instructies in [REVIEW.md](REVIEW.md).
 
 ---
 
@@ -9,15 +10,9 @@ Lees dit bestand aan het begin van elke sessie. Alle instructies hier overschrij
 Lokale crypto portfolio tracker (macOS). Python 3.12 + Streamlit + SQLite + httpx + uv.
 Geen cloud, geen auth, geen private keys.
 
-**Fase 1 (MVP) — dit is de actieve fase:**
-- On-chain import via Etherscan V2 (ETH/ARB/BASE/OP/POL) + Routescan (BEAM)
-- Wallet management
-- Opt-in token review (scam filter, standaard alles UIT)
-- Balansen per token per wallet
-
-**Expliciet NIET in fase 1:**
-Bitcoin, EUR/CoinGecko, cost basis, belastingrapport, staking-classificatie, CSV-import (Delta/Etherscan).
-Bouw dit niet tenzij er expliciet om gevraagd wordt.
+Het project is opgedeeld in 8 fasen, elk uit blokken (zie [project_spec.md](project_spec.md)).
+De huidige actieve fase staat bovenaan in project_spec.md. Bouw nooit vooruit op een latere
+fase tenzij expliciet gevraagd.
 
 ---
 
@@ -26,7 +21,9 @@ Bouw dit niet tenzij er expliciet om gevraagd wordt.
 ```
 crypto-tracker/
 ├── CLAUDE.md
+├── REVIEW.md
 ├── project_spec.md
+├── CHECKLIST.md
 ├── pyproject.toml
 ├── .env                    # nooit committen
 ├── .env.example
@@ -42,7 +39,11 @@ crypto-tracker/
     ├── db.py
     ├── models.py
     ├── api.py
+    ├── parsers.py
     ├── fetcher.py
+    ├── token_review.py
+    ├── balance_check.py
+    ├── staking.py
     └── backup.py
 ```
 
@@ -50,7 +51,8 @@ crypto-tracker/
 
 **Strikte scheiding:**
 - `core/api.py` raakt nooit de DB — puur HTTP
-- `core/fetcher.py` roept api.py en db.py aan, bevat geen HTTP-code
+- `core/parsers.py` is pure data-transformatie (raw API-row → dict), geen DB, geen HTTP
+- `core/fetcher.py` orkestreert: roept `api` + `parsers` + `db` aan, bevat geen HTTP-code
 - Pages bevatten geen business logic — ze roepen core-functies aan en renderen resultaten
 
 ---
@@ -146,9 +148,9 @@ UUID als transactie-PK (niet AUTOINCREMENT).
 ## 8. Git-regels
 
 - `main` is altijd stabiel — nooit direct committen
-- Branches: `feature/korte-naam`
+- Branches per blok: `feature/x-y-naam` (zie blok in project_spec.md)
 - Nooit committen: `.env`, `*.db`, `backups/`
-- Commit format: `[fase] korte omschrijving`
+- Commit format: `[fase x.y] korte omschrijving`
 
 ---
 
@@ -164,3 +166,59 @@ uv run python -c "from core.db import reset_db; reset_db()"
 # Dependency toevoegen
 uv add package-naam
 ```
+
+---
+
+## 10. Werkwijze per blok
+
+Een blok is de kleinste mergebare eenheid. Volg deze flow:
+
+```
+1. Branch:  git checkout -b feature/x-y-naam
+2. Bouwen:  per acceptatiecriterium één commit
+3. Testen:  alle test-scenarios uit project_spec.md handmatig doorlopen
+4. Review:  /review (lokaal, Sonnet) — fix bevindingen
+5. Merge:   PR maken, mergen naar main, branch verwijderen
+```
+
+Aan het eind van elke fase: `/ultrareview` (Opus, grondig) op alle blokken samen.
+
+---
+
+## 11. Kickoff per nieuwe fase (Opus)
+
+Aan het begin van een fase doorloop dit protocol vóór er code geschreven wordt:
+
+1. **Scope-analyse** — relevante code, doel van de fase en gerelateerde memory lezen
+2. **Vragenlijst** — open vragen stellen tot 95% helder is
+3. **Blok-uitwerking** — per blok: doel, files, acceptatiecriteria, test-scenarios, model
+4. **Risico's & afhankelijkheden** — wat moet eerder klaar? Welk schema verandert?
+5. **Akkoord** — gebruiker bevestigt blok-indeling vóór er gebouwd wordt
+
+---
+
+## 12. Model-tiering
+
+Modelkeuze is sessie-niveau (`/model`). Per blok staat in project_spec.md welk
+model aanbevolen is.
+
+| Model | Wanneer |
+|---|---|
+| **Opus 4.7** | Architectuur, schemawijzigingen, complexe algoritmes, fase-kickoff, security review |
+| **Sonnet 4.6** | Standaard implementatie binnen bekend patroon, UI-pagina's, code review per blok, refactors |
+| **Haiku 4.5** | Mechanische taken volgens een al uitgewerkt plan: file moves, simpele tests, doc-updates |
+
+---
+
+## 13. Review-flow
+
+We werken op een individueel plan zonder betaalde managed reviews. De flow:
+
+- **Per blok**: `/review` skill of `code-review` plugin lokaal — Sonnet, snel
+- **Per fase**: `/ultrareview` op alle blokken samen — Opus, grondig
+- **Instructies**: zowel `/review` als `/ultrareview` lezen [REVIEW.md](REVIEW.md) als
+  hoogste-prioriteit gids voor wat Important vs Nit is in dit project
+
+REVIEW.md bevat de project-specifieke severity-calibratie (Decimal-correctheid =
+Important, Streamlit-styling = Nit max). Pas REVIEW.md aan zodra een nieuwe
+foutklasse blijkt belangrijk te zijn.
