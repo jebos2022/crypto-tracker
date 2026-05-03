@@ -76,6 +76,28 @@ CREATE TABLE IF NOT EXISTS token_metadata (
     fetched_at       TEXT    NOT NULL,
     PRIMARY KEY (contract_address, chain)
 );
+
+-- token_public_evidence: cached public-source signals for token review.
+-- Sources include coingecko_token_list, coingecko_contract, and goplus.
+CREATE TABLE IF NOT EXISTS token_public_evidence (
+    chain            TEXT    NOT NULL,
+    contract_address TEXT    NOT NULL,
+    source           TEXT    NOT NULL,
+    status           TEXT    NOT NULL,
+    name             TEXT,
+    symbol           TEXT,
+    reason           TEXT,
+    payload_json     TEXT,
+    fetched_at       TEXT    NOT NULL,
+    PRIMARY KEY (chain, contract_address, source)
+);
+
+CREATE TABLE IF NOT EXISTS token_source_cache (
+    source     TEXT NOT NULL,
+    chain      TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (source, chain)
+);
 """
 
 INDICES_SQL = """
@@ -86,6 +108,7 @@ CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions(timestamp);
 CREATE INDEX IF NOT EXISTS idx_tx_hash      ON transactions(tx_hash);
 CREATE INDEX IF NOT EXISTS idx_token_review_asset ON token_review(chain, asset);
 CREATE INDEX IF NOT EXISTS idx_token_review_contract ON token_review(chain, contract_address);
+CREATE INDEX IF NOT EXISTS idx_token_public_evidence_contract ON token_public_evidence(chain, contract_address);
 """
 
 
@@ -291,6 +314,30 @@ def _migrate_token_review_contract_keys(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE _token_review_old")
 
 
+def _migrate_token_public_evidence(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS token_public_evidence (
+            chain            TEXT    NOT NULL,
+            contract_address TEXT    NOT NULL,
+            source           TEXT    NOT NULL,
+            status           TEXT    NOT NULL,
+            name             TEXT,
+            symbol           TEXT,
+            reason           TEXT,
+            payload_json     TEXT,
+            fetched_at       TEXT    NOT NULL,
+            PRIMARY KEY (chain, contract_address, source)
+        );
+
+        CREATE TABLE IF NOT EXISTS token_source_cache (
+            source     TEXT NOT NULL,
+            chain      TEXT NOT NULL,
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (source, chain)
+        );
+    """)
+
+
 def init_db() -> None:
     conn = get_connection()
     try:
@@ -300,6 +347,7 @@ def init_db() -> None:
         _migrate_tx_address_columns(conn)
         _migrate_tx_method_columns(conn)
         _migrate_token_review_contract_keys(conn)
+        _migrate_token_public_evidence(conn)
         conn.executescript(INDICES_SQL)
         conn.commit()
     finally:

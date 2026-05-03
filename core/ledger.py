@@ -17,6 +17,15 @@ EXPLORER_TX_URLS: dict[str, str] = {
     "beam": "https://subnets.avax.network/beam/tx/{tx_hash}",
 }
 
+EXPLORER_ADDRESS_URLS: dict[str, str] = {
+    "ethereum": "https://etherscan.io/address/{address}",
+    "arbitrum": "https://arbiscan.io/address/{address}",
+    "base": "https://basescan.org/address/{address}",
+    "optimism": "https://optimistic.etherscan.io/address/{address}",
+    "polygon": "https://polygonscan.com/address/{address}",
+    "beam": "https://subnets.avax.network/beam/address/{address}",
+}
+
 KNOWN_ACTION_TARGETS: dict[str, dict[str, str]] = {
     "ethereum": {
         "0x0000000000001ff3684f28c67538d4d072c22734": "0x Swap",
@@ -53,6 +62,21 @@ def explorer_tx_url(chain: str, tx_hash: str | None) -> str:
     chain_info = CHAINS.get(chain)
     if chain_info:
         return f"https://routescan.io/tx/{normalized}?chainid={chain_info['chainid']}"
+    return ""
+
+
+def explorer_address_url(chain: str, address: str | None) -> str:
+    if not address:
+        return ""
+    normalized = address.strip().lower()
+    if not re.fullmatch(r"0x[a-f0-9]{40}", normalized):
+        return ""
+    template = EXPLORER_ADDRESS_URLS.get(chain)
+    if template:
+        return template.format(address=normalized)
+    chain_info = CHAINS.get(chain)
+    if chain_info:
+        return f"https://routescan.io/address/{normalized}?chainid={chain_info['chainid']}"
     return ""
 
 

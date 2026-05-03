@@ -22,6 +22,7 @@ from core.token_review import (
     AUTO_DECISION,
     USER_DECISION,
     classify_token,
+    enrich_public_sources,
     token_key,
     utc_now,
 )
@@ -424,6 +425,16 @@ def fetch_all(
                 summary.errors.append(f"{label} / {wallet['name']}: {e}")
 
             time.sleep(0.15)
+
+    try:
+        enrich_public_sources(
+            progress_fn=(
+                lambda f, t: progress_fn(min(0.95 + f * 0.04, 0.99), t)
+                if progress_fn else None
+            )
+        )
+    except Exception as e:
+        summary.errors.append(f"Publieke token-check: {type(e).__name__}: {e}")
 
     if progress_fn:
         progress_fn(1.0, "Klaar")

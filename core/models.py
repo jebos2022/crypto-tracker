@@ -15,6 +15,24 @@ CHAINS: dict[str, dict] = {
 
 ROUTESCAN_CHAINS: set[str] = {"beam"}
 
+# CoinGecko uses different identifiers for token-list asset platforms and
+# on-chain network endpoints.
+COINGECKO_TOKEN_LIST_PLATFORMS: dict[str, str] = {
+    "ethereum": "ethereum",
+    "arbitrum": "arbitrum-one",
+    "base": "base",
+    "optimism": "optimistic-ethereum",
+    "polygon": "polygon-pos",
+}
+
+COINGECKO_ONCHAIN_NETWORKS: dict[str, str] = {
+    "ethereum": "eth",
+    "arbitrum": "arbitrum",
+    "base": "base",
+    "optimism": "optimism",
+    "polygon": "polygon_pos",
+}
+
 # WETH contract addresses per chain — used to detect missing wrap Transfer events
 WETH_CONTRACTS: dict[str, str] = {
     "ethereum": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
