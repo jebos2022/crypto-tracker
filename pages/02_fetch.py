@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 
 from core.db import get_connection
+from core.env import load_env
 from core.models import CHAINS
 from core.fetcher import fetch_all
 from core.ledger import explorer_address_url, explorer_tx_url, normalize_tx_hash
@@ -14,9 +15,17 @@ from core.token_review import (
     token_intake_guidance, token_intake_sort_key,
     INTAKE_HIDDEN, INTAKE_IMPORT, INTAKE_NOISE, INTAKE_REVIEW,
 )
+from core.token_valuation import (
+    VALUATION_ACTIVE,
+    VALUATION_MANUAL_ZERO,
+    VALUATION_UNKNOWN,
+    VALUATION_WORTHLESS,
+    save_global_valuations,
+)
 
 st.title("Importeren")
 st.caption("Haal on-chain transacties op via de Etherscan en Routescan API.")
+load_env()
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +157,14 @@ if not all_tokens:
     else:
         st.info("Nog geen transacties opgehaald. Klik op 'Haal alle transacties op' hierboven.")
 else:
+    valuation_label_to_status = {
+        "Marktprijs": VALUATION_ACTIVE,
+        "Onbekend": VALUATION_UNKNOWN,
+        "Handmatig 0": VALUATION_MANUAL_ZERO,
+        "Waardeloos": VALUATION_WORTHLESS,
+    }
+    valuation_status_to_label = {status: label for label, status in valuation_label_to_status.items()}
+
     n_contracts = count_enrichable_contracts()
     n_public_contracts = count_public_enrichable_contracts()
     n_enriched = sum(1 for t in all_tokens if t.get("has_metadata"))
@@ -238,6 +255,9 @@ else:
             "scam": "Scam",
         }.get(status, status)
 
+    def _valuation_label(status: str | None) -> str:
+        return valuation_status_to_label.get(status or VALUATION_ACTIVE, "Marktprijs")
+
     def _unknown_hint(token: dict) -> str:
         in_count = int(token.get("in_count") or 0)
         out_count = int(token.get("out_count") or 0)
@@ -290,6 +310,9 @@ else:
                 "Houders": t["holder_count"] if t.get("holder_count") is not None else "—",
                 "Wallets": t["wallet_count"],
                 "Bron": "handmatig" if t.get("decision_source") == "user" else "auto",
+                "Waardering": _valuation_label(t.get("valuation_status")),
+                "Vanaf": t.get("valuation_effective_date") or "",
+                "Notitie": t.get("valuation_reason") or "",
                 "Importeren": bool(t["accepted"]),
             })
         return pd.DataFrame(rows)
@@ -427,6 +450,9 @@ else:
                         "Houders": st.column_config.TextColumn("Houders", disabled=True, width="small"),
                         "Wallets": st.column_config.NumberColumn("Wallets", disabled=True, width="small"),
                         "Bron": st.column_config.TextColumn("Bron", disabled=True, width="small"),
+                        "Waardering": st.column_config.TextColumn("Waardering", disabled=True, width="small"),
+                        "Vanaf": st.column_config.TextColumn("Vanaf", disabled=True, width="small"),
+                        "Notitie": st.column_config.TextColumn("Notitie", disabled=True),
                         "Importeren": st.column_config.CheckboxColumn("Importeren"),
                     },
                     hide_index=True,
@@ -441,3 +467,51 @@ else:
                     ])
                     st.success("✅ Opgeslagen.")
                     st.rerun()
+
+    with st.expander("Handmatige waardering", expanded=False):
+        st.caption("Gebruik dit alleen als je bewust een token vanaf een datum op nul wilt waarderen.")
+        valuation_df = pd.DataFrame([
+            {
+                "Chain": t["chain"],
+                "Token": t["asset"],
+                "Contract": _contract_label(t.get("contract_address")),
+                "Waardering": _valuation_label(t.get("valuation_status")),
+                "Vanaf": t.get("valuation_effective_date") or "",
+                "Notitie": t.get("valuation_reason") or "",
+            }
+            for t in all_tokens
+        ])
+        edited_valuations = st.data_editor(
+            valuation_df,
+            column_config={
+                "Chain": st.column_config.TextColumn("Chain", disabled=True),
+                "Token": st.column_config.TextColumn("Token", disabled=True),
+                "Contract": st.column_config.TextColumn("Contract", disabled=True),
+                "Waardering": st.column_config.SelectboxColumn(
+                    "Waardering",
+                    options=list(valuation_label_to_status),
+                ),
+                "Vanaf": st.column_config.TextColumn("Vanaf"),
+                "Notitie": st.column_config.TextColumn("Notitie"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="manual_valuation_editor",
+        )
+        if st.button("Waarderingen opslaan", key="save_manual_valuations"):
+            try:
+                save_global_valuations([
+                    (
+                        t["chain"],
+                        t["token_key"],
+                        valuation_label_to_status[str(edited_valuations.iloc[i]["Waardering"])],
+                        str(edited_valuations.iloc[i]["Vanaf"] or ""),
+                        str(edited_valuations.iloc[i]["Notitie"] or ""),
+                    )
+                    for i, t in enumerate(all_tokens)
+                ])
+            except ValueError as exc:
+                st.error(f"Niet opgeslagen: {exc}")
+            else:
+                st.success("✅ Waarderingen opgeslagen.")
+                st.rerun()

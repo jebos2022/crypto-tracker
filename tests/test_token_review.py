@@ -5,6 +5,7 @@ from pathlib import Path
 
 from core import db, fetcher, token_review
 from core.ledger import explorer_address_url
+from core.token_identity import ARB_ARBITRUM_CONTRACT
 
 
 SAFE_USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
@@ -121,6 +122,42 @@ class TokenReviewClassifierTests(unittest.TestCase):
 
         self.assertEqual(result.status, token_review.STATUS_SUSPICIOUS)
         self.assertIn("Ticker lijkt op USDC", result.reason)
+        self.assertFalse(result.accepted_by_default)
+
+    def test_classifier_accepts_known_arb_contract(self) -> None:
+        result = token_review.classify_token({
+            "chain": "arbitrum",
+            "asset": "ARB",
+            "contract_address": ARB_ARBITRUM_CONTRACT,
+        })
+
+        self.assertEqual(result.status, token_review.STATUS_SAFE)
+        self.assertTrue(result.accepted_by_default)
+
+    def test_classifier_flags_fake_arb_even_with_public_evidence(self) -> None:
+        result = token_review.classify_token({
+            "chain": "arbitrum",
+            "asset": "ARB",
+            "contract_address": FAKE_USDC,
+            "public_evidence": [{
+                "source": token_review.SOURCE_COINGECKO_LIST,
+                "status": token_review.STATUS_SAFE,
+                "reason": "CoinGecko token list",
+            }],
+        })
+
+        self.assertEqual(result.status, token_review.STATUS_SUSPICIOUS)
+        self.assertIn("Ticker lijkt op ARB", result.reason)
+        self.assertFalse(result.accepted_by_default)
+
+    def test_classifier_flags_fake_staking_wrapper_contract(self) -> None:
+        result = token_review.classify_token({
+            "chain": "arbitrum",
+            "asset": "stPEAR",
+            "contract_address": FAKE_USDC,
+        })
+
+        self.assertEqual(result.status, token_review.STATUS_SUSPICIOUS)
         self.assertFalse(result.accepted_by_default)
 
     def test_classifier_rejects_goplus_high_risk_even_if_public_known(self) -> None:

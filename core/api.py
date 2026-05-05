@@ -27,7 +27,10 @@ import time
 
 import httpx
 
+from core.env import load_env
 from core.models import CHAINS, ROUTESCAN_CHAINS, ETHERSCAN_BASE, ROUTESCAN_BASE, PAGE_SIZE
+
+load_env()
 
 
 # ---------------------------------------------------------------------------

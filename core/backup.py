@@ -4,7 +4,7 @@ from pathlib import Path
 
 from core.db import DB_PATH
 
-BACKUP_DIR = Path(__file__).parent.parent / "backups"
+BACKUP_DIR = DB_PATH.parent / "backups"
 MAX_BACKUPS = 30
 
 

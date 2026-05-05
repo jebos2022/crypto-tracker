@@ -1,8 +1,18 @@
+# Local secrets
 .env
+.env.*
+!.env.example
+
+# Local SQLite databases and journals
 *.db
 *.db-*
+*.sqlite
+*.sqlite3
+
+# Local backups
 *.bak
 backups/
+
 __pycache__/
 .venv/
 *.pyc

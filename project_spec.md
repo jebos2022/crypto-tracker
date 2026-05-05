@@ -16,6 +16,13 @@ Het project is opgebouwd in **fasen**. Elke fase bestaat uit **blokken**: kleine
 zelfstandig mergebare stappen met eigen branch, review en test. Een blok is af
 zodra de acceptatiecriteria + test-scenarios groen zijn én de review goed is.
 
+Elke nieuwe sessie start vanuit `AGENTS.md`/`CLAUDE.md` en `CURRENT.md`.
+`CURRENT.md` is de korte actuele handoff: actieve fase, actieve taak, branch,
+leesvolgorde en expliciete "niet doen"-lijst.
+
+Deze spec is de routekaart op hoofdlijnen. Het volledige uitvoeringsplan van een
+fase wordt pas na de kickoff/sparsessie vastgelegd in `plans/plan-fase-X.md`.
+
 ### Kickoff per fase (Opus)
 
 Aan het begin van elke fase doorloopt Claude (Opus) dit protocol vóór er code
@@ -26,7 +33,8 @@ geschreven wordt:
 3. **Blok-uitwerking** — per blok: doel, files, acceptatiecriteria, test-scenarios,
    aanbevolen model.
 4. **Risico's & afhankelijkheden** — wat moet eerder klaar? Welk schema verandert?
-5. **Akkoord** — gebruiker bevestigt blok-indeling vóór er gebouwd wordt.
+5. **Plan vastleggen** — schrijf of update `plans/plan-fase-X.md` en `CURRENT.md`.
+6. **Akkoord** — gebruiker bevestigt blok-indeling vóór er gebouwd wordt.
 
 ### Blok-werkflow
 
@@ -80,8 +88,8 @@ Per blok staat in deze spec welk model aanbevolen is. Modelwissel doe je via `/m
 | Fase | Naam | Status |
 |---|---|---|
 | 1 | On-chain MVP afronden | ✅ Afgerond |
-| 2 | Ledger-pagina (transactiehistorie) | ☐ Open |
-| 3 | EUR-prijslaag (CoinGecko) | ☐ Open |
+| 2 | Ledger-pagina (transactiehistorie) | ✅ Afgerond |
+| 3 | EUR-prijslaag (CoinGecko + CMC fallback) | ◐ 3.1 t/m 3.10 lokaal afgerond, klaar voor review/merge |
 | 4 | Schema-unificatie + Bitcoin | ☐ Open |
 | 5 | Beurzen (CSV-import) | ☐ Open |
 | 6 | Transactie-classificatie | ☐ Open |
@@ -229,60 +237,107 @@ Nuttig voor handmatige inspectie en als basis voor latere classificatie.
 
 ---
 
-## Fase 3 — EUR-prijslaag (CoinGecko)
+## Fase 3 — EUR-prijslaag (CoinGecko + CoinMarketCap fallback)
 
 **Doel:** Spotprijzen op transactiemoment + dagelijkse close voor peildatums.
 Voorwaarde voor latere validatie van CEX-imports en voor belastingrapport.
 
-### Blok 3.A — price_cache schema + CoinGecko HTTP-laag
+**Bouwplan:** `plans/plan-fase-3.md` is canoniek; externe mirrors zijn alleen kopieën.
+**Huidige taak:** expliciete review/merge of fase 4 kickoff.
+**Status:** subblokken 3.1 t/m 3.10 lokaal geïmplementeerd en getest; blokken blijven open tot review/merge.
+
+**Belangrijke ontwerpkeuzes:**
+- Prijsmapping gebeurt via `(chain, contract_address | None) → coingecko_id`, niet via ticker/symbool.
+- `price_cache` gebruikt `PRIMARY KEY (coingecko_id, date)`.
+- CoinGecko is primair; CoinMarketCap is alleen fallback voor huidige prijzen/id-resolutie, niet historisch.
+- Default prijsophaalpad is bulk/cache-first: `market_chart` per token/jaar en `/simple/price` voor huidige multi-asset prijzen.
+- API-budget wordt bewaakt met `price_fetch_log` en `COINGECKO_DAILY_CALL_BUDGET`.
+
+### Blok 3.A — price_cache schema + CoinGecko HTTP-laag + mapping
 
 **Doel:** Prijsdata-bron + opslag, zonder UI.
-**Aanbevolen model:** Opus — schema-keuze + API-rate-limit ontwerp.
+**Aanbevolen model:** Opus — schema-keuze + rate-limit ontwerp + mapping-strategie.
 **Branch:** feature/3-a-prices-core
-**Wijzigt:** core/db.py (price_cache tabel), core/coingecko.py (nieuw).
+**Wijzigt:** core/db.py, core/coingecko.py (nieuw), core/models.py, .env.example, CLAUDE.md.
 
 **Acceptatiecriteria:**
-- [ ] Tabel `price_cache (asset, date, eur, source, fetched_at)` UNIQUE(asset, date)
-- [ ] `core/coingecko.py` met `fetch_price(asset, date) -> Decimal | None`
-- [ ] Rate-limit (free tier ~30/min) afgevangen met retries
-- [ ] Mapping `asset_symbol → coingecko_id` (handmatig dict, niet auto)
+- [ ] Tabellen `price_cache` en `price_fetch_log` ontstaan na `init_db()`, idempotent.
+- [ ] `price_cache` bevat `coingecko_id`, `date`, `eur`, `source`, `fetched_at` met `PRIMARY KEY (coingecko_id, date)`.
+- [ ] `price_fetch_log` bevat `date`, `source`, `count` met `PRIMARY KEY (date, source)`.
+- [ ] Index `idx_price_cache_date` bestaat.
+- [ ] `core/coingecko.py` bevat `fetch_price`, `fetch_price_range`, `fetch_current_prices`, `calls_today`.
+- [ ] Cache-first: tweede call voor `(coingecko_id, date)` doet geen HTTP-call.
+- [ ] Bulk-fetch via `market_chart`: één call per token/jaar, geen per-dag `/history` loop als default.
+- [ ] Multi-asset huidige prijzen via `/simple/price`: één call voor N tokens.
+- [ ] Daily budget-guard via `COINGECKO_DAILY_CALL_BUDGET` + `price_fetch_log`.
+- [ ] Rate-limit 429 wordt opgevangen met retry, max 5.
+- [ ] Sleep ≥ 2,5s tussen sequential API-calls.
+- [ ] Token-identiteit staat centraal in `core/token_identity.py`: `(chain, contract_address | None) → canonical_asset → coingecko_id`.
+- [ ] `coingecko_id_for()` geeft alleen een prijs-id voor bekende directe/equivalente assets; xOPN/stPEAR hebben een expliciete staking-policy.
+- [ ] Onbekende/scam/LP tokens zonder mapping geven `None`, geen stille symbol-match.
+- [ ] `.env.example` bevat `COINGECKO_API_KEY=` en `COINGECKO_DAILY_CALL_BUDGET=300`.
+- [ ] Geen UI-wijzigingen in dit blok.
 
 **Test-scenarios:**
-1. **Happy path:** fetch_price("ETH", "2024-01-01") → ~2000 EUR opgeslagen.
-2. **Edge case:** onbekend symbool → None, geen crash.
-3. **Edge case:** rate limit → retry, uiteindelijk succes.
+1. **Happy path:** `fetch_price("ethereum", date(2024, 1, 1))` → EUR Decimal opgeslagen.
+2. **Cache-hit:** zelfde call 2× → tweede zonder netwerk-call.
+3. **Bulk fetch:** `fetch_price_range("usd-coin", date(2026,1,1), date(2026,1,31))` → 31 rijen, 1 API-call.
+4. **Multi-asset current:** `fetch_current_prices(["ethereum","usd-coin","matic-network"])` → 3 prijzen in 1 call.
+5. **Staking-wrapper:** xOPN/stPEAR → stake-event policy, geen directe prijs-id.
+6. **Onbekende token:** geen mapping → `None`.
+7. **Rate limit:** gemockte 429-respons → retry + uiteindelijk succes.
+8. **Budget-guard:** budget overschreden → `None`/lege dict, cache-only.
 
-### Blok 3.B — Spotprijs op transactiemoment
+### Blok 3.B — Spotprijs op transactiemoment (balansen + ledger)
 
-**Doel:** Per transactie EUR-waarde berekenen via close-prijs van die dag.
-**Aanbevolen model:** Sonnet — toevoeging op bestaande pagina's.
+**Doel:** EUR-waarde tonen op de balansen-pagina én ledger-pagina.
+**Aanbevolen model:** Sonnet — toevoeging op bestaande pagina's, geen ontwerpkeuzes.
 **Branch:** feature/3-b-spot-pricing
-**Wijzigt:** core/prices.py (nieuw, helper), pages/03_balances.py.
+**Wijzigt:** core/prices.py (nieuw), pages/03_balances.py, pages/04_transacties.py.
 
 **Acceptatiecriteria:**
-- [ ] `eur_value(asset, date, amount)` helper
-- [ ] Cache-first: alleen API call als (asset, date) ontbreekt
-- [ ] Balansen-pagina toont EUR-kolom totaal
+- [ ] `core/prices.py` met `eur_value`, `eur_balances_today`, `eur_transactions`.
+- [ ] Balansen-pagina toont kolom "Waarde (EUR)" + totaal onder de tabel.
+- [ ] Balansen-pagina gebruikt `fetch_current_prices` met één multi-asset call.
+- [ ] Transacties-pagina toont kolom "EUR (op tx-datum)".
+- [ ] Transacties-pagina prefetcht per `(coingecko_id, jaar)` één keer, geen N+1 calls.
+- [ ] CSV-export bevat extra EUR-kolom.
+- [ ] Ontbrekende prijs toont "—", geen exception.
+- [ ] Wrappers (xOPN, stPEAR) worden niet naïef als gewone tokens geprijsd; stake/unstake-eventlogica volgt later.
+- [ ] Totaal-EUR markeert "(deels onbekend)" als er onbekende EUR-cellen zijn.
 
 **Test-scenarios:**
-1. **Happy path:** balans 1 ETH → ~2000 EUR getoond.
-2. **Edge case:** asset zonder coingecko mapping → "—" tonen, geen error.
+1. **Happy path:** balans 1 ETH → EUR getoond, totaal klopt.
+2. **Wrapper:** xOPN/stPEAR geeft geen directe EUR-prijs; waarde moet uit stake/unstake-events komen.
+3. **Edge case:** asset zonder mapping → "—", geen crash.
+4. **Ledger 2026:** bulk-prefetch per token/jaar, daarna cache.
+5. **CSV-export:** bevat EUR-kolom.
+6. **Regressie:** pagina laadt snel als alles gecached is.
 
-### Blok 3.C — Dagelijkse close voor peildatums
+### Blok 3.C — Dagelijkse close voor peildatums (Jaaroverzicht)
 
-**Doel:** Voor 1 januari per jaar: alle gehouden assets × close = portfolio-waarde.
-**Aanbevolen model:** Sonnet.
+**Doel:** Pagina "Jaaroverzicht": per gekozen jaar portfolio-waarde op 1-1 én 31-12.
+**Aanbevolen model:** Sonnet — bouwt op 3.A/3.B, standaard Streamlit-pagina.
 **Branch:** feature/3-c-snapshot-pricing
 **Wijzigt:** core/prices.py, pages/05_jaaroverzicht.py (nieuw).
 
 **Acceptatiecriteria:**
-- [ ] Pagina "Jaaroverzicht": kies jaar → toont waarde per 1 jan en 31 dec
-- [ ] Per token: hoeveelheid × close
-- [ ] Totaal portfolio EUR
+- [ ] `core/prices.py` bevat `balance_at(date)` en `snapshot_for_year(year)`.
+- [ ] Pagina "Jaaroverzicht" met dropdown jaar vanaf eerste tx-jaar tot huidig jaar.
+- [ ] Lazy per jaar: alleen geselecteerd jaar raakt de API.
+- [ ] Tabel: token | hoeveelheid 1-1 | prijs 1-1 | EUR 1-1 | hoeveelheid 31-12 | prijs 31-12 | EUR 31-12.
+- [ ] Totaal portfolio EUR per peildatum + "(deels onbekend)" indicator.
+- [ ] Bulk-fetch: één `market_chart` call per token per jaar.
+- [ ] Pre-flight budgetmelding: "Dit kost X calls, Y/300 vandaag al gebruikt" + doorgaan-knop.
+- [ ] Tweede keer hetzelfde jaar openen doet 0 calls.
 
 **Test-scenarios:**
-1. **Happy path:** jaar 2024 → bedragen kloppen met handmatige check.
-2. **Edge case:** jaar zonder activiteit → lege tabel, geen error.
+1. **Happy path:** 2026 eerst openen → bulk calls per token, bedragen verifiëren tegen CoinGecko.
+2. **Lazy per jaar:** daarna 2025 openen → alleen 2025 extra calls.
+3. **Edge case:** jaar vóór eerste transactie → lege tabel, geen calls.
+4. **Edge case:** geen accepted tokens met EUR-prijs → "—" en deels onbekend.
+5. **Cache:** tweede keer hetzelfde jaar → 0 calls.
+6. **Budget-guard:** te laag budget → waarschuwing en resterende prijzen "—".
 
 ### Blok 3.D — Werkelijk-rendement basis
 
@@ -292,15 +347,22 @@ Voorwaarde voor latere validatie van CEX-imports en voor belastingrapport.
 **Wijzigt:** core/rendement.py (nieuw), pages/05_jaaroverzicht.py.
 
 **Acceptatiecriteria:**
-- [ ] Per token: open_balance × prijs_1jan, close_balance × prijs_31dec
-- [ ] Som inflows en outflows × prijs op transactiemoment
-- [ ] (Voorlopige) classificatie: TRANSFER_IN/OUT meetellen, GAS_FEE niet
-- [ ] Disclaimer in UI: classificatie nog ruw — definitief in fase 6
+- [ ] Module `core/rendement.py` met `compute_year(year) -> list[dict]`.
+- [ ] Per `(wallet, chain, token)`: open_eur, close_eur, in_eur, out_eur, gas_eur, netto_eur.
+- [ ] Netto formule: `(close_eur - open_eur) - (in_eur - out_eur)`.
+- [ ] GAS_FEE is info-kolom en telt niet mee in de formule.
+- [ ] Aggregaat-totaal onderaan de tabel.
+- [ ] `incomplete=True` markeert rij als "(deels onbekend)".
+- [ ] Jaaroverzicht-pagina toont sectie "Werkelijk rendement".
+- [ ] Disclaimer in UI: voorlopige berekening, classificatie wordt verfijnd in fase 6/8.
+- [ ] Geen extra API-calls boven 3.C-budget; cache wordt hergebruikt.
 
 **Test-scenarios:**
-1. **Happy path:** jaar met 1 token, 1 buy, 1 sell → cijfers kloppen handmatig.
+1. **Happy path:** test-jaar met 1 token, 1 buy + 1 sell → cijfers handmatig verifieerbaar.
 2. **Edge case:** token gestart en geheel verkocht in zelfde jaar.
-3. **Regressie:** balansen-pagina toont nog steeds totalen correct.
+3. **Edge case:** jaar zonder tx voor token dat wel saldo heeft.
+4. **Missende prijs:** rij met ontbrekende prijs → `incomplete=True`.
+5. **Regressie:** balansen-pagina toont nog steeds totalen correct.
 
 ---
 
@@ -461,6 +523,78 @@ TRANSFER (interne wallet-transfer). Nodig voor correct werkelijk-rendement.
 1. **Happy path:** ATH-inflow uit BEAM staking-contract → REWARD.
 2. **Edge case:** transfer van zelfde contract maar geen reward (theoretisch) → handmatige override mogelijk.
 
+### Blok 6.D — Staking position reconstruction
+
+**Doel:** Staking wrappers zoals OPN/xOPN en PEAR/stPEAR behandelen als
+positieboekhouding, niet als gewone token-pricing.
+**Aanbevolen model:** Opus — fiscale/economische reconstructie is gevoelig.
+**Branch:** feature/6-d-staking-positions
+**Wijzigt:** core/classify.py, core/staking.py of core/staking_positions.py,
+pages/04_transacties.py, pages/05_jaaroverzicht.py.
+
+**Acceptatiecriteria:**
+- [ ] Herkent stake-open events: underlying out + wrapper in, bijvoorbeeld `-100 OPN` + `+80 xOPN`.
+- [ ] Bewaart de positiegrondslag op basis van de verstuurde underlying, niet op basis van wrapper-aantal.
+- [ ] Herkent unstake/close events: wrapper out + underlying in.
+- [ ] Splitst unstake-opbrengst in principal return en yield/rendement, bijvoorbeeld `100 OPN` inleg en `110 OPN` terug = `10 OPN` yield.
+- [ ] Ondersteunt partial unstake en meerdere open posities conservatief.
+- [ ] xOPN/stPEAR worden niet alsnog als gewone tokens geprijsd in jaaroverzicht of werkelijk rendement.
+- [ ] Oude xGET/staked xGET → xOPN/OPN flow staat expliciet als onderzoeks-/migratiecase.
+
+**Test-scenarios:**
+1. **Happy path:** `-100 OPN +80 xOPN`, later `-80 xOPN +110 OPN` → `10 OPN` yield.
+2. **Partial unstake:** deel van wrapper wordt ingewisseld → pro-rata principal + yield.
+3. **Open positie op peildatum:** positie toont onderliggende inleg als grondslag, wrapper niet los geprijsd.
+4. **Regressie:** gewone transfers en swaps worden niet als stakingpositie gemarkeerd.
+
+### Blok 6.E — Handmatige waarderingsstatus voor dead/worthless tokens
+
+**Doel:** Tokens waarvan het project is gestopt, de markt/liquiditeit verdwenen is
+of de waarde economisch nul is, handmatig kunnen markeren zonder dat de prijslaag
+stiekem ontbrekende prijzen als 0 behandelt.
+**Aanbevolen model:** Opus — waardering en audit trail zijn fiscaal gevoelig.
+**Branch:** feature/6-e-token-valuation-status
+**Wijzigt:** core/token_review.py, core/prices.py, pages/02_fetch.py of aparte token-status UI.
+
+**Acceptatiecriteria:**
+- [ ] Token review ondersteunt status `active` / `unknown` / `manual_zero` / `worthless`
+- [ ] `manual_zero`/`worthless` heeft optionele ingangsdatum, reden en bron/notitie
+- [ ] Ontbrekende CoinGecko-prijs blijft "—"; geen automatische fallback naar 0
+- [ ] Vanaf ingangsdatum mag de waarderingslaag EUR 0 teruggeven met duidelijke status
+- [ ] Balansen/Jaaroverzicht tonen duidelijk dat de nulwaarde handmatig is
+- [ ] Historische inleg/aanschafwaarde blijft zichtbaar voor rapportage
+
+**Test-scenarios:**
+1. **Happy path:** token met ingangsdatum 2025-06-01 → waarde 0 op/na die datum.
+2. **Edge case:** peildatum vóór ingangsdatum → normale marktprijs of "—".
+3. **Regressie:** onbekende token zonder manual status blijft onbekend, niet 0.
+
+### Blok 6.F — Pre-market/private-sale cost basis
+
+**Doel:** Tokens die nog niet publiek verhandelbaar waren, maar wel zijn
+verkregen via ICO/private sale/directe bedrijfsbetaling, waarderen op basis van
+de tegenprestatie in dezelfde economische transactie of overeenkomst.
+Voorbeeld: NCKS gekocht van Nocks vóór publieke handel; de token-inflow krijgt
+dan niet zomaar `—`, maar een kostprijs gebaseerd op het betaalde geld/token.
+**Aanbevolen model:** Opus — fiscale cost-basis reconstructie is gevoelig.
+**Branch:** feature/6-f-private-sale-cost-basis
+**Wijzigt:** core/classify.py, core/cost_basis.py (nieuw), pages/04_transacties.py,
+pages/05_jaaroverzicht.py.
+
+**Acceptatiecriteria:**
+- [ ] Herkent of laat handmatig koppelen: betaling out ↔ pre-market token in.
+- [ ] Kostprijs van ontvangen token wordt gebaseerd op de waarde van de verstuurde tegenprestatie.
+- [ ] Ondersteunt betaling in EUR/stablecoin/crypto met prijs op betaaldatum.
+- [ ] Token zonder marktprijs blijft zonder CoinGecko fallback, maar kan wel een kostprijs krijgen.
+- [ ] Jaaroverzicht en werkelijk rendement tonen marktwaarde en cost basis apart.
+- [ ] Audit trail/notitie bij handmatige koppeling, zonder wallet- of contractdata in rapportage te lekken.
+
+**Test-scenarios:**
+1. **Happy path:** betaling ter waarde van EUR 1.000 → NCKS-inflow krijgt cost basis EUR 1.000.
+2. **Crypto betaling:** ETH/USDC out op datum → EUR-waarde van outflow wordt kostprijs.
+3. **Geen koppeling:** pre-market token zonder bewijs blijft `—`/incompleet, niet automatisch 0 of symbol-priced.
+4. **Regressie:** gewone swaps blijven via marktprijs/swapclassificatie lopen.
+
 ---
 
 ## Fase 7 — Delta reconcile-flow
@@ -593,3 +727,24 @@ gerealiseerde EUR-resultaat berekenen.
 **Test-scenarios:**
 1. **Happy path:** PDF opent in Preview, alle bedragen leesbaar.
 2. **Edge case:** veel tokens → meerdere pagina's, geen overlapping.
+
+### Blok 8.E — Dead/worthless tokens in belastingrapportage
+
+**Doel:** Handmatige nulwaarderingen uit fase 6 correct en transparant meenemen
+in Box 3, werkelijk rendement en PDF-export.
+**Aanbevolen model:** Opus — fiscale aannames en audit trail zijn kritisch.
+**Branch:** feature/8-e-worthless-token-reporting
+**Wijzigt:** core/tax.py, pages/08_belasting.py, core/pdf_export.py.
+
+**Acceptatiecriteria:**
+- [ ] Rapport gebruikt de waarderingsstatus uit fase 6
+- [ ] `manual_zero`/`worthless` telt vanaf ingangsdatum met eindwaarde EUR 0
+- [ ] Rapport toont reden/bron/notitie bij handmatige nulwaardering
+- [ ] Werkelijk-rendement overzicht laat historische inleg én afwaardering naar 0 zien
+- [ ] PDF markeert handmatige nulwaarderingen expliciet
+- [ ] Geen fiscale conclusie automatisch forceren; aannames blijven zichtbaar
+
+**Test-scenarios:**
+1. **Happy path:** token met historische inleg en `manual_zero` → eindwaarde 0 + notitie.
+2. **Edge case:** peildatum vóór ingangsdatum → nog geen nulwaardering.
+3. **Regressie:** token met ontbrekende prijs maar zonder manual status blijft incompleet.

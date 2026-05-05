@@ -1,5 +1,6 @@
-from dotenv import load_dotenv
-load_dotenv()
+from core.env import load_env
+
+load_env()
 
 import streamlit as st
 from core.db import init_db

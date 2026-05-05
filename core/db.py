@@ -51,6 +51,9 @@ CREATE TABLE IF NOT EXISTS token_review (
     review_reason    TEXT    NOT NULL DEFAULT 'Nog onvoldoende metadata',
     decision_source  TEXT    NOT NULL DEFAULT 'auto',
     decision_updated_at TEXT,
+    valuation_status TEXT    NOT NULL DEFAULT 'active',
+    valuation_effective_date TEXT,
+    valuation_reason TEXT,
     PRIMARY KEY (wallet_id, chain, token_key)
 );
 
@@ -98,6 +101,22 @@ CREATE TABLE IF NOT EXISTS token_source_cache (
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (source, chain)
 );
+
+CREATE TABLE IF NOT EXISTS price_cache (
+    coingecko_id TEXT NOT NULL,
+    date         TEXT NOT NULL,
+    eur          TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    fetched_at   TEXT NOT NULL,
+    PRIMARY KEY (coingecko_id, date)
+);
+
+CREATE TABLE IF NOT EXISTS price_fetch_log (
+    date   TEXT    NOT NULL,
+    source TEXT    NOT NULL,
+    count  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (date, source)
+);
 """
 
 INDICES_SQL = """
@@ -109,8 +128,8 @@ CREATE INDEX IF NOT EXISTS idx_tx_hash      ON transactions(tx_hash);
 CREATE INDEX IF NOT EXISTS idx_token_review_asset ON token_review(chain, asset);
 CREATE INDEX IF NOT EXISTS idx_token_review_contract ON token_review(chain, contract_address);
 CREATE INDEX IF NOT EXISTS idx_token_public_evidence_contract ON token_public_evidence(chain, contract_address);
+CREATE INDEX IF NOT EXISTS idx_price_cache_date ON price_cache(date);
 """
-
 
 def get_connection() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -119,8 +138,6 @@ def get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     return conn
-
-
 # Endpoints we track per (wallet, chain) — must stay in sync with core.fetcher.
 TRACKED_ENDPOINTS: tuple[str, ...] = ("tokentx", "txlist", "txlistinternal")
 
@@ -258,6 +275,9 @@ def _create_token_review_table(conn: sqlite3.Connection) -> None:
             review_reason    TEXT    NOT NULL DEFAULT 'Nog onvoldoende metadata',
             decision_source  TEXT    NOT NULL DEFAULT 'auto',
             decision_updated_at TEXT,
+            valuation_status TEXT    NOT NULL DEFAULT 'active',
+            valuation_effective_date TEXT,
+            valuation_reason TEXT,
             PRIMARY KEY (wallet_id, chain, token_key)
         );
     """)
@@ -284,6 +304,9 @@ def _migrate_token_review_contract_keys(conn: sqlite3.Connection) -> None:
             ("review_reason", "ALTER TABLE token_review ADD COLUMN review_reason TEXT NOT NULL DEFAULT 'Nog onvoldoende metadata'"),
             ("decision_source", "ALTER TABLE token_review ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'auto'"),
             ("decision_updated_at", "ALTER TABLE token_review ADD COLUMN decision_updated_at TEXT"),
+            ("valuation_status", "ALTER TABLE token_review ADD COLUMN valuation_status TEXT NOT NULL DEFAULT 'active'"),
+            ("valuation_effective_date", "ALTER TABLE token_review ADD COLUMN valuation_effective_date TEXT"),
+            ("valuation_reason", "ALTER TABLE token_review ADD COLUMN valuation_reason TEXT"),
         ):
             if col not in cols:
                 conn.execute(ddl)
@@ -355,8 +378,6 @@ def init_db() -> None:
 
     from core.token_review import reclassify_all_token_reviews
     reclassify_all_token_reviews()
-
-
 def reset_db() -> None:
     if DB_PATH.exists():
         DB_PATH.unlink()

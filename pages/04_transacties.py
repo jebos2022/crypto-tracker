@@ -16,6 +16,7 @@ from core.ledger import (
 )
 from core.ledger_backfill import backfill_transaction_methods
 from core.models import CHAINS, format_token, to_decimal
+from core.prices import eur_transactions
 from core.token_review import token_review_join_condition
 
 
@@ -23,7 +24,7 @@ st.title("Transacties")
 st.caption("Inspecteer geaccepteerde on-chain transacties per wallet, chain en token.")
 
 
-TABLE_COLUMNS = ["Datum", "Wallet", "Chain", "Type", "Actie", "Signaal", "Bedrag", "Asset", "Tx", "Bron", "Explorer"]
+TABLE_COLUMNS = ["Datum", "Wallet", "Chain", "Type", "Actie", "Signaal", "Bedrag", "Asset", "EUR (op tx-datum)", "Tx", "Bron", "Explorer"]
 CSV_COLUMNS = [
     "timestamp",
     "wallet",
@@ -34,6 +35,7 @@ CSV_COLUMNS = [
     "signal",
     "amount",
     "asset",
+    "eur_value",
     "tx_hash",
     "normalized_tx_hash",
     "source",
@@ -49,6 +51,7 @@ GROUPED_TABLE_COLUMNS = [
     "Uit",
     "In",
     "Gas",
+    "EUR (op tx-datum)",
     "Tx",
     "Bron",
     "Explorer",
@@ -63,6 +66,8 @@ GROUPED_CSV_COLUMNS = [
     "out",
     "in",
     "gas",
+    "eur_value",
+    "eur_partial",
     "assets",
     "tx_hash",
     "source",
@@ -101,7 +106,34 @@ def _get_chains(wallet_id: int | None) -> list[str]:
         conn.close()
 
 
-def _get_assets(wallet_id: int | None, chain: str | None) -> list[str]:
+def _get_years(wallet_id: int | None, chain: str | None) -> list[int]:
+    sql = f"""
+        SELECT DISTINCT substr(t.timestamp, 1, 4) AS year
+        FROM transactions t
+        JOIN token_review tr
+          ON {token_review_join_condition("t", "tr")}
+        WHERE tr.accepted = 1
+          AND t.timestamp IS NOT NULL
+          AND length(t.timestamp) >= 4
+    """
+    params: list = []
+    if wallet_id is not None:
+        sql += " AND t.wallet_id = ?"
+        params.append(wallet_id)
+    if chain is not None:
+        sql += " AND t.chain = ?"
+        params.append(chain)
+    sql += " ORDER BY year DESC"
+
+    conn = get_connection()
+    try:
+        years = [r["year"] for r in conn.execute(sql, params).fetchall()]
+        return [int(year) for year in years if year and str(year).isdigit()]
+    finally:
+        conn.close()
+
+
+def _get_assets(wallet_id: int | None, chain: str | None, year: int | None) -> list[str]:
     sql = f"""
         SELECT DISTINCT t.asset
         FROM transactions t
@@ -116,6 +148,9 @@ def _get_assets(wallet_id: int | None, chain: str | None) -> list[str]:
     if chain is not None:
         sql += " AND t.chain = ?"
         params.append(chain)
+    if year is not None:
+        sql += " AND substr(t.timestamp, 1, 4) = ?"
+        params.append(str(year))
     sql += " ORDER BY t.asset"
 
     conn = get_connection()
@@ -128,6 +163,7 @@ def _get_assets(wallet_id: int | None, chain: str | None) -> list[str]:
 def _get_transactions(
     wallet_id: int | None,
     chain: str | None,
+    year: int | None,
     descending: bool,
 ) -> list[dict]:
     sql = f"""
@@ -169,6 +205,9 @@ def _get_transactions(
     if chain is not None:
         sql += " AND t.chain = ?"
         params.append(chain)
+    if year is not None:
+        sql += " AND substr(t.timestamp, 1, 4) = ?"
+        params.append(str(year))
     direction = "DESC" if descending else "ASC"
     sql += """
         GROUP BY
@@ -211,6 +250,13 @@ def _display_plain_amount(value: Decimal) -> str:
     return format_token(value, decimals=decimals)
 
 
+def _display_eur(value: Decimal | None, manual: bool = False) -> str:
+    if value is None:
+        return "—"
+    suffix = " (handmatig 0)" if manual else ""
+    return f"€ {format_token(value, decimals=2)}{suffix}"
+
+
 def _summarize_rows(rows: list[dict], absolute: bool = False) -> str:
     totals: dict[str, Decimal] = {}
     order: list[str] = []
@@ -229,6 +275,28 @@ def _summarize_rows(rows: list[dict], absolute: bool = False) -> str:
         formatted = _display_plain_amount(abs(amount)) if absolute else _display_signed_amount(amount)
         parts.append(f"{formatted} {asset}")
     return " | ".join(parts) or "-"
+
+
+def _summarize_eur(rows: list[dict]) -> str:
+    known = [row["eur_value"] for row in rows if row.get("eur_value") is not None]
+    if not known:
+        return "—"
+    total = sum(known, Decimal("0"))
+    suffix = " (deels)" if any(row.get("eur_missing") for row in rows) else ""
+    if any(row.get("valuation_manual") for row in rows):
+        suffix = f"{suffix} (handmatig 0)"
+    return f"{_display_eur(total)}{suffix}"
+
+
+def _csv_eur(value: Decimal | None) -> str:
+    return "" if value is None else str(value)
+
+
+def _without_eur(rows: list[dict]) -> list[dict]:
+    return [
+        {**row, "coingecko_id": None, "eur_price": None, "eur_value": None, "eur_missing": False}
+        for row in rows
+    ]
 
 
 def _split_group_rows(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
@@ -300,6 +368,7 @@ def _table_df(rows: list[dict]) -> pd.DataFrame:
             "Signaal": token_signal(row) or "-",
             "Bedrag": _display_amount(row["amount"]),
             "Asset": row["asset"],
+            "EUR (op tx-datum)": _display_eur(row.get("eur_value"), bool(row.get("valuation_manual"))),
             "Tx": short_tx_hash(row["tx_hash"]),
             "Bron": row["source"],
             "Explorer": explorer_tx_url(row["chain"], row["tx_hash"]),
@@ -321,6 +390,7 @@ def _grouped_table_df(groups: list[dict]) -> pd.DataFrame:
             "Uit": _summarize_rows(out_rows, absolute=True),
             "In": _summarize_rows(in_rows, absolute=True),
             "Gas": _summarize_rows(gas_rows, absolute=True),
+            "EUR (op tx-datum)": _summarize_eur(group["rows"]),
             "Tx": short_tx_hash(group["tx_hash"]),
             "Bron": ", ".join(group["sources"]),
             "Explorer": explorer_tx_url(group["chain"], group["tx_hash"]),
@@ -342,6 +412,7 @@ def _csv_df(rows: list[dict]) -> pd.DataFrame:
             "signal": token_signal(row),
             "amount": row["amount"],
             "asset": row["asset"],
+            "eur_value": _csv_eur(row.get("eur_value")),
             "tx_hash": row["tx_hash"],
             "normalized_tx_hash": normalized,
             "source": row["source"],
@@ -364,6 +435,8 @@ def _grouped_csv_df(groups: list[dict]) -> pd.DataFrame:
             "out": _summarize_rows(out_rows, absolute=True),
             "in": _summarize_rows(in_rows, absolute=True),
             "gas": _summarize_rows(gas_rows, absolute=True),
+            "eur_value": _csv_eur(_group_eur_value(group["rows"])),
+            "eur_partial": any(row.get("eur_missing") for row in group["rows"]),
             "assets": ", ".join(group["assets"]),
             "tx_hash": group["tx_hash"],
             "source": ", ".join(group["sources"]),
@@ -371,6 +444,11 @@ def _grouped_csv_df(groups: list[dict]) -> pd.DataFrame:
             "explorer_url": explorer_tx_url(group["chain"], group["tx_hash"]),
         })
     return pd.DataFrame(csv_rows, columns=GROUPED_CSV_COLUMNS)
+
+
+def _group_eur_value(rows: list[dict]) -> Decimal | None:
+    known = [row["eur_value"] for row in rows if row.get("eur_value") is not None]
+    return sum(known, Decimal("0")) if known else None
 
 
 wallets = _get_wallets()
@@ -381,7 +459,7 @@ if not wallets:
 
 wallet_options = ["Alle wallets"] + [w["name"] for w in wallets]
 
-col_wallet, col_chain, col_asset, col_view, col_sort = st.columns([2, 2, 2, 1.6, 1.4])
+col_wallet, col_chain, col_year, col_asset, col_view, col_sort = st.columns([1.8, 1.8, 1.2, 1.8, 1.5, 1.3])
 
 wallet_label = col_wallet.selectbox("Wallet", wallet_options, key="tx_wallet")
 wallet_id = None if wallet_label == "Alle wallets" else next(
@@ -394,7 +472,18 @@ chain_options = ["Alle chains"] + list(chain_label_to_key.keys())
 selected_chain_label = col_chain.selectbox("Chain", chain_options, key="tx_chain")
 selected_chain = None if selected_chain_label == "Alle chains" else chain_label_to_key[selected_chain_label]
 
-assets = _get_assets(wallet_id, selected_chain)
+years = _get_years(wallet_id, selected_chain)
+year_options = ["Alle jaren"] + [str(year) for year in years]
+selected_year_index = 1 if years else 0
+selected_year_label = col_year.selectbox(
+    "Jaar",
+    year_options,
+    index=selected_year_index,
+    key="tx_year",
+)
+selected_year = None if selected_year_label == "Alle jaren" else int(selected_year_label)
+
+assets = _get_assets(wallet_id, selected_chain, selected_year)
 asset_options = ["Alle tokens"] + assets
 asset_label = col_asset.selectbox("Token", asset_options, key="tx_asset")
 selected_asset = None if asset_label == "Alle tokens" else asset_label
@@ -412,7 +501,22 @@ view_label = col_view.selectbox(
     key="tx_view",
 )
 
-all_rows = _get_transactions(wallet_id, selected_chain, descending)
+raw_all_rows = _get_transactions(wallet_id, selected_chain, selected_year, descending)
+tx_eur_context = "|".join([
+    str(wallet_id) if wallet_id is not None else "all-wallets",
+    selected_chain or "all-chains",
+    str(selected_year) if selected_year is not None else "all-years",
+])
+tx_eur_loaded_contexts = set(st.session_state.get("tx_eur_loaded_contexts", []))
+if st.button("Laad EUR op tx-datum", key="tx_load_eur"):
+    tx_eur_loaded_contexts.add(tx_eur_context)
+    st.session_state["tx_eur_loaded_contexts"] = sorted(tx_eur_loaded_contexts)
+load_eur = tx_eur_context in tx_eur_loaded_contexts
+if load_eur:
+    all_rows = eur_transactions(raw_all_rows)
+else:
+    st.caption("EUR-waarden worden pas geladen na klikken op **Laad EUR op tx-datum**.")
+    all_rows = _without_eur(raw_all_rows)
 raw_rows = [row for row in all_rows if selected_asset is None or row["asset"] == selected_asset]
 groups = logical_tx_groups(all_rows, selected_asset)
 
@@ -481,6 +585,7 @@ if visible_count:
             "In": st.column_config.TextColumn("In"),
             "Gas": st.column_config.TextColumn("Gas"),
             "Asset": st.column_config.TextColumn("Asset"),
+            "EUR (op tx-datum)": st.column_config.TextColumn("EUR (op tx-datum)"),
             "Tx": st.column_config.TextColumn("Tx"),
             "Bron": st.column_config.TextColumn("Bron"),
             "Explorer": st.column_config.LinkColumn("Explorer", display_text="Open"),

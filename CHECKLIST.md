@@ -5,6 +5,22 @@ Afvinken = gedaan + getest + gemerged naar main.
 
 Volgorde van werken: kickoff (Opus) per fase → blokken sequentieel → fase-review (`/ultrareview`).
 
+## Actuele status
+
+Laatst bijgewerkt: 2026-05-05.
+
+| Fase | Naam | Status |
+|---|---|---|
+| Setup | Projectbasis | ✅ Afgerond |
+| 1 | On-chain MVP afronden | ✅ Afgerond |
+| 2 | Ledger-pagina (transactiehistorie) | ✅ Afgerond |
+| 3 | EUR-prijslaag (CoinGecko + CMC fallback) | ◐ 3.1 t/m 3.10 lokaal afgerond, klaar voor review/merge |
+| 4 | Schema-unificatie + Bitcoin | ☐ Open |
+| 5 | Beurzen (CSV-import) | ☐ Open |
+| 6 | Transactie-classificatie | ☐ Open |
+| 7 | Delta reconcile-flow | ☐ Open |
+| 8 | Belastingrapport | ☐ Open |
+
 ---
 
 ## Setup
@@ -12,7 +28,7 @@ Volgorde van werken: kickoff (Opus) per fase → blokken sequentieel → fase-re
 - [x] Nieuwe map aangemaakt (`crypto-tracker/`)
 - [x] Git repo geïnitialiseerd
 - [x] uv project + dependencies (streamlit, httpx, python-dotenv)
-- [x] CLAUDE.md + project_spec.md + REVIEW.md geschreven
+- [x] AGENTS.md/CLAUDE.md + CURRENT.md + project_spec.md + REVIEW.md geschreven
 - [x] GitHub repo aangemaakt en gekoppeld
 - [x] `.env` aanmaken met API keys (`cp .env.example .env`)
 
@@ -115,47 +131,82 @@ Volgorde van werken: kickoff (Opus) per fase → blokken sequentieel → fase-re
 
 ---
 
-## Fase 3 — EUR-prijslaag (CoinGecko)
+## Fase 3 — EUR-prijslaag (CoinGecko + CoinMarketCap fallback)
+
+> Bouwplan: `plans/plan-fase-3.md` is canoniek; externe mirrors zijn alleen kopieën.
+> Huidige taak: expliciete review/merge of fase 4 kickoff.
+> Status: subblokken 3.1 t/m 3.10 lokaal geïmplementeerd en getest; blokken blijven open tot review/merge.
 
 ### Kickoff (Opus)
-- [ ] Scope-analyse + vragenlijst
-- [ ] Blok-uitwerking bevestigd
+- [x] Scope-analyse + vragenlijst
+- [x] Blok-uitwerking bevestigd
 
-### Blok 3.A — price_cache schema + CoinGecko HTTP-laag
+### Blok 3.A — price_cache schema + CoinGecko HTTP-laag + mapping
 **Branch:** feature/3-a-prices-core — **Model:** Opus
-- [ ] Tabel price_cache UNIQUE(asset, date)
-- [ ] core/coingecko.py met fetch_price
-- [ ] Rate-limit afgevangen
-- [ ] Mapping asset_symbol → coingecko_id
-- [ ] Test: happy / onbekend symbool / rate limit retry
+> Voortgang 2026-05-04: subblokken 3.1 t/m 3.8 zijn lokaal afgerond en getest met gerichte tests, de volledige unittest-suite en een lokale Streamlit-start.
+- [ ] Tabellen `price_cache` en `price_fetch_log` ontstaan na `init_db()`, idempotent
+- [ ] `price_cache` gebruikt `PRIMARY KEY (coingecko_id, date)`, niet ticker/symbool
+- [ ] Index `idx_price_cache_date` bestaat
+- [ ] `core/coingecko.py` bevat `fetch_price`, `fetch_price_range`, `fetch_current_prices`, `calls_today`
+- [ ] Cache-first: tweede call voor `(coingecko_id, date)` doet geen HTTP-call
+- [ ] Bulk-fetch via `market_chart`: één call per token/jaar, geen per-dag `/history` loop als default
+- [ ] Multi-asset huidige prijzen via `/simple/price`: één call voor N tokens
+- [ ] Daily budget-guard via `COINGECKO_DAILY_CALL_BUDGET` + `price_fetch_log`
+- [ ] Rate-limit 429 wordt opgevangen met retry, max 5
+- [ ] Sleep ≥ 2,5s tussen sequential API-calls
+- [ ] Token-identiteit staat centraal in `core/token_identity.py`: `(chain, contract_address | None) → canonical_asset → coingecko_id`
+- [ ] `coingecko_id_for()` geeft alleen directe/equivalente price ids; xOPN/stPEAR hebben staking-policy, geen directe prijsredirect
+- [ ] Onbekende/scam/LP tokens zonder mapping geven `None`, geen stille symbol-match
+- [ ] `.env.example` bevat `COINGECKO_API_KEY=` en `COINGECKO_DAILY_CALL_BUDGET=300`
+- [ ] Geen UI-wijzigingen in dit blok
+- [ ] Test: happy / cache-hit / bulk fetch / multi-asset current / wrapper redirect / onbekende token / rate limit / budget-guard
 - [ ] /review groen → merge
 
-### Blok 3.B — Spotprijs op transactiemoment
+### Blok 3.B — Spotprijs op transactiemoment (balansen + ledger)
 **Branch:** feature/3-b-spot-pricing — **Model:** Sonnet
-- [ ] eur_value(asset, date, amount) helper
-- [ ] Cache-first lookup
-- [ ] Balansen-pagina toont EUR-kolom totaal
-- [ ] Test: happy / unmapped asset
+- [ ] `core/prices.py` met `eur_value`, `eur_balances_today`, `eur_transactions`
+- [ ] Balansen-pagina toont kolom "Waarde (EUR)" + totaal onder de tabel
+- [ ] Balansen-pagina gebruikt `fetch_current_prices` met één multi-asset call
+- [ ] Transacties-pagina toont kolom "EUR (op tx-datum)"
+- [ ] Transacties-pagina prefetcht per `(coingecko_id, jaar)` één keer, geen N+1 calls
+- [ ] CSV-export bevat extra EUR-kolom
+- [ ] Ontbrekende prijs toont "—", geen exception
+- [ ] Wrappers (xOPN, stPEAR) worden niet naïef als gewone tokens geprijsd; stake/unstake-eventlogica volgt later
+- [ ] Totaal-EUR markeert "(deels onbekend)" als er onbekende EUR-cellen zijn
+- [ ] Test: happy / wrapper / missende mapping / ledger 2026 / CSV-export / cached regressie
 - [ ] /review groen → merge
 
-### Blok 3.C — Dagelijkse close voor peildatums
+### Blok 3.C — Dagelijkse close voor peildatums (Jaaroverzicht)
 **Branch:** feature/3-c-snapshot-pricing — **Model:** Sonnet
-- [ ] Pagina "Jaaroverzicht" met jaar-keuze
-- [ ] Per token: hoeveelheid × close
-- [ ] Totaal portfolio EUR
-- [ ] Test: happy / leeg jaar
+- [ ] `core/prices.py` uitgebreid met `balance_at(date)` en `snapshot_for_year(year)`
+- [ ] Pagina `pages/05_jaaroverzicht.py` met dropdown jaar
+- [ ] Jaarlijst loopt van eerste tx-jaar tot huidig jaar
+- [ ] Lazy per jaar: alleen geselecteerd jaar raakt de API
+- [ ] Tabel: token | hoeveelheid 1-1 | prijs 1-1 | EUR 1-1 | hoeveelheid 31-12 | prijs 31-12 | EUR 31-12
+- [ ] Totaal portfolio EUR per peildatum + "(deels onbekend)" indicator
+- [ ] Bulk-fetch: één `market_chart` call per token per jaar
+- [ ] Pre-flight budgetmelding: "Dit kost X calls, Y/300 vandaag al gebruikt" + doorgaan-knop
+- [ ] Tweede keer hetzelfde jaar openen doet 0 calls
+- [ ] Test: happy 2026 eerst / lazy 2025 daarna / jaar vóór eerste tx / geen EUR-prijs / cache / budget-guard
 - [ ] /review groen → merge
 
 ### Blok 3.D — Werkelijk-rendement basis
 **Branch:** feature/3-d-realized-rendement — **Model:** Opus
-- [ ] Per token: open × prijs_1jan, close × prijs_31dec
-- [ ] Som inflows/outflows × prijs op transactiemoment
-- [ ] (Voorlopige) classificatie: TRANSFER mee, GAS niet
-- [ ] Disclaimer in UI
-- [ ] Test: 1-token jaar / start+end jaar / regressie balansen
+> Voortgang 2026-05-05: subblok 3.9 en 3.10 zijn lokaal afgerond en getest met de volledige unittest-suite (103 tests). Checkboxes blijven open tot review/merge volgens deze checklist-afspraak.
+- [ ] Module `core/rendement.py` met `compute_year(year) -> list[dict]`
+- [ ] Per `(wallet, chain, token)`: open_eur, close_eur, in_eur, out_eur, gas_eur, netto_eur
+- [ ] Netto formule: `(close_eur - open_eur) - (in_eur - out_eur)`
+- [ ] GAS_FEE is info-kolom en telt niet mee in de formule
+- [ ] Aggregaat-totaal onderaan de tabel
+- [ ] `incomplete=True` markeert rij als "(deels onbekend)"
+- [ ] Jaaroverzicht-pagina toont sectie "Werkelijk rendement"
+- [ ] Disclaimer in UI: voorlopige berekening, classificatie wordt verfijnd in fase 6/8
+- [ ] Geen extra API-calls boven 3.C-budget; cache wordt hergebruikt
+- [ ] Test: 1 token buy+sell / token gestart en verkocht zelfde jaar / saldo zonder tx / missende prijs / regressie balansen
 - [ ] /review groen → merge
 
 ### Fase 3 afgerond
+> Lokale fase-review 2026-05-05: tests/compile groen; review-fix voor nul-balans peildatum in `snapshot_for_year()` toegevoegd. `/ultrareview`/merge nog niet uitgevoerd.
 - [ ] `/ultrareview` op fase 3
 
 ---
@@ -263,6 +314,39 @@ Volgorde van werken: kickoff (Opus) per fase → blokken sequentieel → fase-re
 - [ ] Test: happy / niet-reward inflow uit zelfde contract (handmatige override)
 - [ ] /review groen → merge
 
+### Blok 6.D — Staking position reconstruction
+**Branch:** feature/6-d-staking-positions — **Model:** Opus
+- [ ] Herkent stake-open: underlying out + wrapper in (`-100 OPN` + `+80 xOPN`)
+- [ ] Positiegrondslag blijft de verstuurde underlying, niet het wrapper-aantal
+- [ ] Herkent unstake/close: wrapper out + underlying in
+- [ ] Splitst unstake in principal return + yield/rendement (`110 OPN` terug op `100 OPN` inleg = `10 OPN` yield)
+- [ ] Ondersteunt partial unstake en meerdere open posities conservatief
+- [ ] xOPN/stPEAR worden niet als gewone tokens geprijsd in jaaroverzicht/rendement
+- [ ] Oude xGET/staked xGET → xOPN/OPN flow staat als onderzoeks-/migratiecase
+- [ ] Test: happy / partial unstake / open positie op peildatum / regressie gewone transfers
+- [ ] /review groen → merge
+
+### Blok 6.E — Handmatige waarderingsstatus voor dead/worthless tokens
+**Branch:** feature/6-e-token-valuation-status — **Model:** Opus
+- [ ] Token review ondersteunt status `active` / `unknown` / `manual_zero` / `worthless`
+- [ ] `manual_zero`/`worthless` heeft optionele ingangsdatum, reden en bron/notitie
+- [ ] Geen automatische prijsfallback naar 0 bij ontbrekende marktprijs
+- [ ] Balansen/Jaaroverzicht tonen duidelijk "handmatig op nul gezet" vanaf ingangsdatum
+- [ ] Historische inleg/aanschafwaarde blijft zichtbaar
+- [ ] Test: dead token vanaf datum 0 / vóór datum normale prijs of "—" / unknown blijft "—"
+- [ ] /review groen → merge
+
+### Blok 6.F — Pre-market/private-sale cost basis
+**Branch:** feature/6-f-private-sale-cost-basis — **Model:** Opus
+- [ ] Herkent of laat handmatig koppelen: betaling out ↔ pre-market token in
+- [ ] Kostprijs ontvangen token wordt gebaseerd op waarde van verstuurde tegenprestatie
+- [ ] Ondersteunt EUR/stablecoin/crypto betaling met prijs op betaaldatum
+- [ ] Token zonder marktprijs krijgt geen CoinGecko fallback, maar kan wel cost basis krijgen
+- [ ] Jaaroverzicht/rendement tonen marktwaarde en cost basis apart
+- [ ] Audit trail/notitie bij handmatige koppeling
+- [ ] Test: NCKS/private-sale happy / crypto betaling / geen koppeling blijft incompleet / regressie gewone swaps
+- [ ] /review groen → merge
+
 ### Fase 6 afgerond
 - [ ] `/ultrareview` op fase 6
 
@@ -337,6 +421,16 @@ Volgorde van werken: kickoff (Opus) per fase → blokken sequentieel → fase-re
 - [ ] PDF per jaar met forfait + rendement + kostprijs
 - [ ] Download-knop
 - [ ] Test: PDF opent in Preview / veel tokens (multi-page)
+- [ ] /review groen → merge
+
+### Blok 8.E — Dead/worthless tokens in belastingrapportage
+**Branch:** feature/8-e-worthless-token-reporting — **Model:** Opus
+- [ ] Rapport gebruikt waarderingsstatus uit fase 6
+- [ ] `manual_zero`/`worthless` telt vanaf ingangsdatum met eindwaarde EUR 0
+- [ ] Rapport toont reden/bron/notitie en markeert dit als handmatige waardering
+- [ ] Werkelijk-rendement overzicht laat historische inleg én afwaardering naar 0 zien
+- [ ] Geen fiscale conclusie automatisch forceren; aannames blijven zichtbaar
+- [ ] Test: dead token met historische inleg / peildatum vóór en na ingangsdatum / PDF-vermelding
 - [ ] /review groen → merge
 
 ### Fase 8 afgerond
