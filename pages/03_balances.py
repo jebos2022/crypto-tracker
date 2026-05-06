@@ -4,28 +4,18 @@ import streamlit as st
 import pandas as pd
 
 from core.balances import get_balances, get_bridge_summary, get_wallets, summarize_balances
-from core.models import CHAINS, format_token
+from core.models import CHAINS, format_eur, format_token
 from core.balance_check import verify_balances
 from core.prices import eur_balances_today
-from core.token_review import sync_staking_wrappers
 
 st.title("Balansen")
 st.caption("Som van alle transacties per token per wallet. Alleen tokens waarvoor 'Importeren' aangevinkt is.")
 
 ZERO_THRESHOLD = Decimal("0.000001")
 
-# Ensure staked wrapper tokens (xOPN, stPEAR) are accepted when their underlying is.
-sync_staking_wrappers()
-
-
-def _format_eur(value: Decimal | None) -> str:
-    if value is None:
-        return "—"
-    return f"€ {format_token(value, decimals=2)}"
-
 
 def _format_eur_row(row: dict) -> str:
-    value = _format_eur(row.get("eur_value"))
+    value = format_eur(row.get("eur_value"))
     return f"{value} (handmatig 0)" if row.get("valuation_manual") else value
 
 
@@ -66,7 +56,7 @@ def _asset_detail_df(rows: list[dict]) -> pd.DataFrame:
 
 
 def _asset_summary_title(item: dict) -> str:
-    eur = _format_eur(item["eur_value"] if item["eur_known"] else None)
+    eur = format_eur(item["eur_value"] if item["eur_known"] else None)
     suffix = " · deels onbekend" if item["eur_missing"] else ""
     return f"{item['asset']} details · {format_token(item['balance'])} · {eur}{suffix}"
 
@@ -75,7 +65,7 @@ def _asset_overview_df(items: list[dict]) -> pd.DataFrame:
     return pd.DataFrame([{
         "Asset": item["asset"],
         "Balans": format_token(item["balance"]),
-        "Waarde (EUR)": _format_eur(item["eur_value"] if item["eur_known"] else None),
+        "Waarde (EUR)": format_eur(item["eur_value"] if item["eur_known"] else None),
         "Chains": _chain_list(item["chains"]),
         "Wallets": ", ".join(sorted(item["wallets"])),
         "Tokens": ", ".join(sorted(item["tokens"])),
@@ -195,7 +185,16 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Tokens", total_tokens)
 c2.metric("Positief saldo", positive)
 c3.metric("⚠️ Negatief", negatives)
-c4.metric("Waarde EUR", _format_eur(total_eur) if load_eur else "Niet geladen", delta="deels onbekend" if eur_partial else None)
+eur_delta_parts = []
+if eur_partial:
+    eur_delta_parts.append("deels onbekend")
+if load_eur:
+    eur_delta_parts.append("excl. live staking")
+c4.metric(
+    "Waarde EUR",
+    format_eur(total_eur) if load_eur else "Niet geladen",
+    delta=" · ".join(eur_delta_parts) if eur_delta_parts else None,
+)
 
 st.divider()
 st.subheader("Overzicht per asset")
@@ -363,14 +362,9 @@ st.caption(
 )
 
 if st.button("Laad BEAM staking saldo", key="beam_staking_btn"):
-    from core.db import get_connection as _gc
     from core.staking import fetch_beam_staking_balance
 
-    conn = _gc()
-    beam_wallets = conn.execute(
-        "SELECT id, name, address FROM wallets ORDER BY id"
-    ).fetchall()
-    conn.close()
+    beam_wallets = get_wallets()
 
     staking_rows = []
     for w in beam_wallets:
@@ -385,5 +379,6 @@ if st.button("Laad BEAM staking saldo", key="beam_staking_btn"):
 
     if staking_rows:
         st.dataframe(pd.DataFrame(staking_rows), hide_index=True, width="stretch")
+        st.caption("Dit live staking saldo telt niet mee in de Waarde EUR-metric hierboven.")
     else:
         st.info("Geen BEAM staking gevonden voor de bekende wallets.")

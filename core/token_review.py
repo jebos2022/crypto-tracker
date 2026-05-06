@@ -204,8 +204,8 @@ def token_key(asset: str, contract_address: str | None) -> str:
 def token_key_sql(tx_alias: str = "t") -> str:
     return (
         f"CASE WHEN {tx_alias}.contract_address IS NOT NULL "
-        f"AND {tx_alias}.contract_address != '' "
-        f"THEN lower({tx_alias}.contract_address) "
+        f"AND trim({tx_alias}.contract_address) != '' "
+        f"THEN lower(trim({tx_alias}.contract_address)) "
         f"ELSE 'native:' || {tx_alias}.asset END"
     )
 

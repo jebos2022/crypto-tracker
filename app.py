@@ -5,8 +5,10 @@ load_env()
 import streamlit as st
 from core.db import init_db
 from core.backup import create_backup
+from core.token_review import reclassify_all_token_reviews
 
 init_db()
+reclassify_all_token_reviews()
 
 st.set_page_config(
     page_title="Crypto Tracker",
@@ -16,7 +18,7 @@ st.set_page_config(
 
 with st.sidebar:
     st.title("Crypto Tracker")
-    st.caption("Fase 2 — Ledger")
+    st.caption("Lokale portfolio tracker")
     st.divider()
     st.page_link("pages/01_wallets.py",  label="EVM wallets", icon="👛")
     st.page_link("pages/02_fetch.py",    label="Importeren", icon="⬇️")

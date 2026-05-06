@@ -586,6 +586,45 @@ class TokenReviewDatabaseTests(unittest.TestCase):
 
         self.assertEqual([r["contract_address"] for r in rows], [SAFE_USDC])
 
+    def test_contract_aware_join_trims_transaction_contract_address(self) -> None:
+        path = self._path()
+        conn_factory = self._with_token_review_db(path)
+        conn = conn_factory()
+        conn.executescript(db.SCHEMA_SQL)
+        conn.execute("INSERT INTO wallets (id, name, address) VALUES (1, 'Main', '0xabc')")
+        conn.execute(
+            """
+            INSERT INTO transactions
+                (id, wallet_id, chain, timestamp, block_number, tx_hash, type,
+                 asset, contract_address, amount, source)
+            VALUES ('tx', 1, 'ethereum', '2026-04-30T10:00:00', 1,
+                    '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                    'TRANSFER_IN', 'USDC', ?, '1', 'tokentx')
+            """,
+            (f"  {SAFE_USDC.upper()}  ",),
+        )
+        conn.execute(
+            """
+            INSERT INTO token_review
+                (wallet_id, chain, token_key, asset, contract_address, accepted)
+            VALUES (1, 'ethereum', ?, 'USDC', ?, 1)
+            """,
+            (SAFE_USDC, SAFE_USDC),
+        )
+        conn.commit()
+
+        rows = conn.execute(
+            f"""
+            SELECT t.id
+            FROM transactions t
+            JOIN token_review tr
+              ON {token_review.token_review_join_condition("t", "tr")}
+            """
+        ).fetchall()
+        conn.close()
+
+        self.assertEqual([r["id"] for r in rows], ["tx"])
+
     def test_unique_tokens_include_contract_aware_activity_summary(self) -> None:
         path = self._path()
         conn_factory = self._with_token_review_db(path)

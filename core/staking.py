@@ -5,10 +5,14 @@ Formula: OPN_held_by_vault / total_xOPN_supply
 Works for simple single-asset vaults where the underlying is held at the staking contract address.
 """
 
+import logging
 from decimal import Decimal
 
-from core.models import STAKED_TOKENS
+from core.models import BEAM_STAKING_CONTRACT, STAKED_TOKENS
 from core import api
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def get_staking_rate(chain: str, staked_token: str) -> Decimal | None:
@@ -30,7 +34,14 @@ def get_staking_rate(chain: str, staked_token: str) -> Decimal | None:
             return None
         # Both values are raw (same 18-decimal base), so the ratio is the exchange rate.
         return Decimal(vault_balance) / Decimal(total_supply)
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning(
+            "Staking rate lookup failed for %s/%s: %s",
+            chain,
+            staked_token,
+            exc,
+            exc_info=True,
+        )
         return None
 
 
@@ -45,13 +56,13 @@ def all_staking_rates() -> dict[tuple[str, str], Decimal]:
     return rates
 
 
-BEAM_STAKING_CONTRACT = "0x2fd428a5484d113294b44e69cb9f269abc1d5b54"
-
-
 def fetch_beam_staking_balance(address: str) -> Decimal | None:
     """
     Live calculation of staked BEAM through the node staking contract.
     Returns the net staked amount, or None when the API call fails.
+
+    Intentionally uncached: this runs only behind an explicit UI button. Add a
+    cache later only if multi-wallet live lookups are measured as too slow.
     """
     try:
         deposits = Decimal("0")
@@ -74,5 +85,6 @@ def fetch_beam_staking_balance(address: str) -> Decimal | None:
 
         wei = Decimal("10") ** 18
         return (deposits - withdrawals) / wei
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("BEAM staking balance lookup failed: %s", exc, exc_info=True)
         return None

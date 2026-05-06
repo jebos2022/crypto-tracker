@@ -25,6 +25,8 @@ CHAINS: dict[str, dict] = {
 
 ROUTESCAN_CHAINS: set[str] = {"beam"}
 
+BEAM_STAKING_CONTRACT = "0x2fd428a5484d113294b44e69cb9f269abc1d5b54"
+
 # CoinGecko uses different identifiers for token-list asset platforms and
 # on-chain network endpoints.
 COINGECKO_TOKEN_LIST_PLATFORMS: dict[str, str] = {
@@ -130,6 +132,17 @@ def to_decimal(raw) -> Decimal:
         return Decimal("0")
 
 
+def to_decimal_strict(raw, field_name: str = "value") -> Decimal:
+    """Convert API input to Decimal, raising on malformed values."""
+    try:
+        value = Decimal(str(raw).replace(",", "").strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"invalid decimal for {field_name}: {raw!r}") from exc
+    if not value.is_finite():
+        raise ValueError(f"invalid decimal for {field_name}: {raw!r}")
+    return value
+
+
 def to_db(d: Decimal) -> str:
     """Store Decimal as TEXT for SQLite."""
     return str(d)
@@ -144,3 +157,9 @@ def format_token(d: Decimal | None, decimals: int = 6) -> str:
     formatted = f"{rounded:,.{decimals}f}"
     # Python uses comma for thousands, period for decimal — swap for Dutch
     return formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def format_eur(d: Decimal | None) -> str:
+    if d is None:
+        return "—"
+    return f"€ {format_token(d, decimals=2)}"

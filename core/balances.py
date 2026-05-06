@@ -1,8 +1,7 @@
 from decimal import Decimal
 
 from core.db import get_connection
-from core.models import BRIDGE_IN, BRIDGE_OUT, to_decimal
-from core.staking import BEAM_STAKING_CONTRACT
+from core.models import BEAM_STAKING_CONTRACT, BRIDGE_IN, BRIDGE_OUT, to_decimal
 from core.token_identity import PRICING_STAKE_EVENT, token_identity_for
 from core.token_review import token_review_join_condition
 
@@ -10,7 +9,7 @@ from core.token_review import token_review_join_condition
 def get_wallets() -> list[dict]:
     conn = get_connection()
     try:
-        rows = conn.execute("SELECT id, name FROM wallets ORDER BY name").fetchall()
+        rows = conn.execute("SELECT id, name, address FROM wallets ORDER BY name").fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()

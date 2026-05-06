@@ -1,6 +1,7 @@
 import unittest
+from decimal import Decimal
 
-from core.models import COINGECKO_IDS, coingecko_id_for, get_staked_info
+from core.models import COINGECKO_IDS, coingecko_id_for, format_eur, format_token, get_staked_info
 from core.token_identity import (
     ARB_ARBITRUM_CONTRACT,
     ATH_ARBITRUM_CONTRACT,
@@ -103,6 +104,15 @@ class CoingeckoMappingTests(unittest.TestCase):
         self.assertNotIn(("ethereum", ETHEREUM_XOPN), COINGECKO_IDS)
         self.assertNotIn(("arbitrum", ARBITRUM_STPEAR), COINGECKO_IDS)
         self.assertNotIn(("ethereum", "USDC"), COINGECKO_IDS)
+
+    def test_format_eur_uses_dutch_decimal_format(self) -> None:
+        self.assertEqual(format_eur(Decimal("1234.5")), "€ 1.234,50")
+        self.assertEqual(format_eur(None), "—")
+
+    def test_format_token_uses_dutch_decimal_format(self) -> None:
+        self.assertEqual(format_token(Decimal("1234567.891"), decimals=2), "1.234.567,89")
+        self.assertEqual(format_token(Decimal("1"), decimals=0), "1")
+        self.assertEqual(format_token(None), "—")
 
 
 if __name__ == "__main__":

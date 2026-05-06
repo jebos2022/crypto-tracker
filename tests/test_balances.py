@@ -2,7 +2,7 @@ import unittest
 from decimal import Decimal
 
 from core.balances import beam_staking_positions_from_rows, summarize_balances
-from core.staking import BEAM_STAKING_CONTRACT
+from core.models import BEAM_STAKING_CONTRACT
 from core.token_identity import WBEAM_BEAM_CONTRACT
 
 

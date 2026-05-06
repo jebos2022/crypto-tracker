@@ -109,18 +109,101 @@ class DbMigrationTests(unittest.TestCase):
             db.init_db()
             conn = sqlite3.connect(path)
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
+            rows_before = conn.execute(
+                "SELECT token_key, asset, accepted, review_status FROM token_review"
+            ).fetchall()
+            conn.close()
+            token_review.reclassify_all_token_reviews()
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            rows_after = conn.execute(
                 "SELECT token_key, asset, accepted, review_status FROM token_review"
             ).fetchall()
             conn.close()
         finally:
             db.DB_PATH = original_path
 
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["token_key"], "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
-        self.assertEqual(rows[0]["asset"], "USDC")
-        self.assertEqual(rows[0]["accepted"], 1)
-        self.assertEqual(rows[0]["review_status"], token_review.STATUS_SAFE)
+        self.assertEqual(len(rows_before), 1)
+        self.assertEqual(rows_before[0]["token_key"], "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+        self.assertEqual(rows_before[0]["asset"], "USDC")
+        self.assertEqual(rows_before[0]["accepted"], 0)
+        self.assertEqual(rows_before[0]["review_status"], token_review.STATUS_UNKNOWN)
+        self.assertEqual(rows_after[0]["accepted"], 1)
+        self.assertEqual(rows_after[0]["review_status"], token_review.STATUS_SAFE)
+
+    def test_old_accepted_flag_is_reclassified_not_carried_blindly(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "portfolio.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE wallets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                address TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE transactions (
+                id TEXT PRIMARY KEY,
+                wallet_id INTEGER NOT NULL,
+                chain TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                block_number INTEGER NOT NULL DEFAULT 0,
+                tx_hash TEXT NOT NULL,
+                from_address TEXT,
+                to_address TEXT,
+                type TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                contract_address TEXT,
+                amount TEXT NOT NULL,
+                source TEXT NOT NULL,
+                method_id TEXT,
+                method_name TEXT,
+                UNIQUE (tx_hash, wallet_id, source)
+            );
+            CREATE TABLE token_review (
+                wallet_id INTEGER NOT NULL,
+                chain TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                contract_address TEXT,
+                accepted INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (wallet_id, chain, asset)
+            );
+            INSERT INTO wallets (id, name, address)
+            VALUES (1, 'main', '0x1111111111111111111111111111111111111111');
+            INSERT INTO transactions
+                (id, wallet_id, chain, timestamp, block_number, tx_hash,
+                 type, asset, contract_address, amount, source)
+            VALUES
+                ('tx1', 1, 'ethereum', '2026-04-30T10:00:00', 1,
+                 '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'TRANSFER_IN', 'USDC',
+                 '0x9999999999999999999999999999999999999999',
+                 '10', 'tokentx');
+            INSERT INTO token_review
+            VALUES (1, 'ethereum', 'USDC', '0x9999999999999999999999999999999999999999', 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        original_path = db.DB_PATH
+        db.DB_PATH = path
+        try:
+            db.init_db()
+            token_review.reclassify_all_token_reviews()
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT token_key, asset, accepted, review_status, decision_source FROM token_review"
+            ).fetchone()
+            conn.close()
+        finally:
+            db.DB_PATH = original_path
+
+        self.assertEqual(row["token_key"], "0x9999999999999999999999999999999999999999")
+        self.assertEqual(row["asset"], "USDC")
+        self.assertEqual(row["accepted"], 0)
+        self.assertEqual(row["review_status"], token_review.STATUS_SUSPICIOUS)
+        self.assertEqual(row["decision_source"], token_review.AUTO_DECISION)
 
 
 if __name__ == "__main__":

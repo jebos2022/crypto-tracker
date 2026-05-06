@@ -1,8 +1,6 @@
 import sqlite3
 from pathlib import Path
 
-# Store the DB outside iCloud Drive — iCloud can revert SQLite files on sync.
-# ~/Library/Application Support is the macOS convention for local app data.
 DB_PATH = Path.home() / "Library" / "Application Support" / "crypto-tracker" / "portfolio.db"
 
 SCHEMA_SQL = """
@@ -57,8 +55,6 @@ CREATE TABLE IF NOT EXISTS token_review (
     PRIMARY KEY (wallet_id, chain, token_key)
 );
 
--- token_meta: per-contract decimals + symbol, harvested from tokentx rows.
--- Needed to scale raw balances from `tokenbalance` for verification.
 CREATE TABLE IF NOT EXISTS token_meta (
     chain            TEXT    NOT NULL,
     contract_address TEXT    NOT NULL,
@@ -68,7 +64,6 @@ CREATE TABLE IF NOT EXISTS token_meta (
     PRIMARY KEY (chain, contract_address)
 );
 
--- token_metadata: Etherscan tokeninfo enrichment (verification, holders, social presence).
 CREATE TABLE IF NOT EXISTS token_metadata (
     contract_address TEXT    NOT NULL,
     chain            TEXT    NOT NULL,
@@ -80,8 +75,6 @@ CREATE TABLE IF NOT EXISTS token_metadata (
     PRIMARY KEY (contract_address, chain)
 );
 
--- token_public_evidence: cached public-source signals for token review.
--- Sources include coingecko_token_list, coingecko_contract, and goplus.
 CREATE TABLE IF NOT EXISTS token_public_evidence (
     chain            TEXT    NOT NULL,
     contract_address TEXT    NOT NULL,
@@ -256,8 +249,8 @@ def _migrate_tx_address_columns(conn: sqlite3.Connection) -> None:
 def _token_key_sql(table_alias: str = "t") -> str:
     return (
         f"CASE WHEN {table_alias}.contract_address IS NOT NULL "
-        f"AND {table_alias}.contract_address != '' "
-        f"THEN lower({table_alias}.contract_address) "
+        f"AND trim({table_alias}.contract_address) != '' "
+        f"THEN lower(trim({table_alias}.contract_address)) "
         f"ELSE 'native:' || {table_alias}.asset END"
     )
 
@@ -288,8 +281,8 @@ def _migrate_token_review_contract_keys(conn: sqlite3.Connection) -> None:
     Rebuild old asset-keyed token_review rows from transactions.
 
     Existing token choices predate explicit user-vs-auto decisions, so they are
-    treated as provisional. core.token_review.reclassify_all_token_reviews()
-    applies the smart defaults after init_db() completes.
+    treated as provisional. Call core.token_review.reclassify_all_token_reviews()
+    explicitly after init_db() when smart defaults should be applied.
     """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='token_review'"
@@ -376,8 +369,7 @@ def init_db() -> None:
     finally:
         conn.close()
 
-    from core.token_review import reclassify_all_token_reviews
-    reclassify_all_token_reviews()
+
 def reset_db() -> None:
     if DB_PATH.exists():
         DB_PATH.unlink()
@@ -394,5 +386,14 @@ def clear_transactions() -> None:
         # token_meta is intentionally kept — decimals don't change and re-fetch
         # would just re-populate identical rows. Wipe via reset_db() if needed.
         conn.commit()
+    finally:
+        conn.close()
+
+
+def transaction_count() -> int:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()
+        return row[0] if row else 0
     finally:
         conn.close()
