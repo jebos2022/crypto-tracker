@@ -8,8 +8,10 @@ from core.fetcher import fetch_all
 from core.models import CHAINS
 from core.token_review import get_unique_tokens
 from core.wallets import get_wallets_for_fetch
+from ui.styles import apply_design_system
 from ui.token_intake import render_token_intake
 
+apply_design_system()
 
 st.title("Importeren")
 st.caption("Haal on-chain transacties op via de Etherscan en Routescan API.")

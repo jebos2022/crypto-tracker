@@ -1,5 +1,8 @@
 import streamlit as st
 from core.wallets import add_wallet, delete_wallet, get_wallets_with_fetch_state
+from ui.styles import apply_design_system
+
+apply_design_system()
 
 st.title("EVM wallets")
 st.caption(

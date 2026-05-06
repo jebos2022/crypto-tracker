@@ -7,6 +7,9 @@ from core.balances import get_balances, get_bridge_summary, get_wallets, summari
 from core.models import CHAINS, format_eur, format_token
 from core.balance_check import verify_balances
 from core.prices import eur_balances_today
+from ui.styles import apply_design_system
+
+apply_design_system()
 
 st.title("Balansen")
 st.caption("Som van alle transacties per token per wallet. Alleen tokens waarvoor 'Importeren' aangevinkt is.")

@@ -1,5 +1,6 @@
 import streamlit as st
 
+from ui.styles import apply_design_system
 from core.ledger import (
     csv_filename,
     logical_tx_groups,
@@ -22,6 +23,8 @@ from ui.transaction_tables import (
     without_eur,
 )
 
+
+apply_design_system()
 
 st.title("Transacties")
 st.caption("Inspecteer geaccepteerde on-chain transacties per wallet, chain en token.")
