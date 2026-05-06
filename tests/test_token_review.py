@@ -5,6 +5,7 @@ from pathlib import Path
 
 from core import db, fetcher, token_review
 from core.ledger import explorer_address_url
+from core.token_identity import ARB_ARBITRUM_CONTRACT
 
 
 SAFE_USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
@@ -121,6 +122,42 @@ class TokenReviewClassifierTests(unittest.TestCase):
 
         self.assertEqual(result.status, token_review.STATUS_SUSPICIOUS)
         self.assertIn("Ticker lijkt op USDC", result.reason)
+        self.assertFalse(result.accepted_by_default)
+
+    def test_classifier_accepts_known_arb_contract(self) -> None:
+        result = token_review.classify_token({
+            "chain": "arbitrum",
+            "asset": "ARB",
+            "contract_address": ARB_ARBITRUM_CONTRACT,
+        })
+
+        self.assertEqual(result.status, token_review.STATUS_SAFE)
+        self.assertTrue(result.accepted_by_default)
+
+    def test_classifier_flags_fake_arb_even_with_public_evidence(self) -> None:
+        result = token_review.classify_token({
+            "chain": "arbitrum",
+            "asset": "ARB",
+            "contract_address": FAKE_USDC,
+            "public_evidence": [{
+                "source": token_review.SOURCE_COINGECKO_LIST,
+                "status": token_review.STATUS_SAFE,
+                "reason": "CoinGecko token list",
+            }],
+        })
+
+        self.assertEqual(result.status, token_review.STATUS_SUSPICIOUS)
+        self.assertIn("Ticker lijkt op ARB", result.reason)
+        self.assertFalse(result.accepted_by_default)
+
+    def test_classifier_flags_fake_staking_wrapper_contract(self) -> None:
+        result = token_review.classify_token({
+            "chain": "arbitrum",
+            "asset": "stPEAR",
+            "contract_address": FAKE_USDC,
+        })
+
+        self.assertEqual(result.status, token_review.STATUS_SUSPICIOUS)
         self.assertFalse(result.accepted_by_default)
 
     def test_classifier_rejects_goplus_high_risk_even_if_public_known(self) -> None:
@@ -548,6 +585,45 @@ class TokenReviewDatabaseTests(unittest.TestCase):
         conn.close()
 
         self.assertEqual([r["contract_address"] for r in rows], [SAFE_USDC])
+
+    def test_contract_aware_join_trims_transaction_contract_address(self) -> None:
+        path = self._path()
+        conn_factory = self._with_token_review_db(path)
+        conn = conn_factory()
+        conn.executescript(db.SCHEMA_SQL)
+        conn.execute("INSERT INTO wallets (id, name, address) VALUES (1, 'Main', '0xabc')")
+        conn.execute(
+            """
+            INSERT INTO transactions
+                (id, wallet_id, chain, timestamp, block_number, tx_hash, type,
+                 asset, contract_address, amount, source)
+            VALUES ('tx', 1, 'ethereum', '2026-04-30T10:00:00', 1,
+                    '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+                    'TRANSFER_IN', 'USDC', ?, '1', 'tokentx')
+            """,
+            (f"  {SAFE_USDC.upper()}  ",),
+        )
+        conn.execute(
+            """
+            INSERT INTO token_review
+                (wallet_id, chain, token_key, asset, contract_address, accepted)
+            VALUES (1, 'ethereum', ?, 'USDC', ?, 1)
+            """,
+            (SAFE_USDC, SAFE_USDC),
+        )
+        conn.commit()
+
+        rows = conn.execute(
+            f"""
+            SELECT t.id
+            FROM transactions t
+            JOIN token_review tr
+              ON {token_review.token_review_join_condition("t", "tr")}
+            """
+        ).fetchall()
+        conn.close()
+
+        self.assertEqual([r["id"] for r in rows], ["tx"])
 
     def test_unique_tokens_include_contract_aware_activity_summary(self) -> None:
         path = self._path()

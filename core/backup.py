@@ -1,10 +1,10 @@
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core.db import DB_PATH
 
-BACKUP_DIR = Path(__file__).parent.parent / "backups"
+BACKUP_DIR = DB_PATH.parent / "backups"
 MAX_BACKUPS = 30
 
 
@@ -12,7 +12,7 @@ def create_backup() -> Path | None:
     if not DB_PATH.exists():
         return None
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     dest = BACKUP_DIR / f"portfolio_{timestamp}.bak"
     shutil.copy2(DB_PATH, dest)
     _rotate_backups()

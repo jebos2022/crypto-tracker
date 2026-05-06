@@ -1,5 +1,15 @@
 from decimal import Decimal, InvalidOperation
 
+from core.token_identity import (
+    COINGECKO_IDS,
+    STAKED_TOKENS,
+    USDC_CONTRACTS,
+    WETH_CONTRACTS,
+    coingecko_id_for,
+    get_staked_info,
+    is_known_safe_token_contract,
+)
+
 # ---------------------------------------------------------------------------
 # Chain registry — single source of truth
 # ---------------------------------------------------------------------------
@@ -14,6 +24,8 @@ CHAINS: dict[str, dict] = {
 }
 
 ROUTESCAN_CHAINS: set[str] = {"beam"}
+
+BEAM_STAKING_CONTRACT = "0x2fd428a5484d113294b44e69cb9f269abc1d5b54"
 
 # CoinGecko uses different identifiers for token-list asset platforms and
 # on-chain network endpoints.
@@ -31,15 +43,6 @@ COINGECKO_ONCHAIN_NETWORKS: dict[str, str] = {
     "base": "base",
     "optimism": "optimism",
     "polygon": "polygon_pos",
-}
-
-# WETH contract addresses per chain — used to detect missing wrap Transfer events
-WETH_CONTRACTS: dict[str, str] = {
-    "ethereum": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-    "arbitrum": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
-    "base":     "0x4200000000000000000000000000000000000006",
-    "optimism": "0x4200000000000000000000000000000000000006",
-    "polygon":  "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619",
 }
 
 ETHERSCAN_BASE = "https://api.etherscan.io/v2/api"
@@ -108,63 +111,6 @@ def is_bridge_contract(chain: str, address: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Staked token registry — maps staking wrapper tokens to their underlying.
-# Used to fold xOPN → OPN, stPEAR → PEAR on the balances page.
-# The exchange rate is fetched live: underlying_in_vault / staked_total_supply.
-# All addresses must be lowercase.
-# ---------------------------------------------------------------------------
-
-STAKED_TOKENS: dict[str, dict[str, dict]] = {
-    "ethereum": {
-        "xOPN": {
-            "underlying":            "OPN",
-            "underlying_contract":   "0xc28eb2250d1ae32c7e74cfb6d6b86afc9beb6509",
-            "staking_contract":      "0x686e8500b6be8812eb198aabbbfa14c95c03fc88",
-        },
-    },
-    "arbitrum": {
-        "stPEAR": {
-            "underlying":            "PEAR",
-            "underlying_contract":   "0x3212dc0f8c834e4de893532d27cc9b6001684db0",
-            "staking_contract":      "0xce3be5204017bb1bd279937f92df09fd7f539b92",
-        },
-    },
-}
-
-
-def get_staked_info(chain: str, asset: str) -> dict | None:
-    """Return staking info if asset is a known staking wrapper, else None."""
-    return STAKED_TOKENS.get(chain, {}).get(asset)
-
-
-# Contracts that are safe enough to auto-accept without tokeninfo enrichment.
-# Keep this deliberately small; everything else can still be accepted manually
-# from Token review after inspection.
-KNOWN_SAFE_TOKEN_CONTRACTS: set[tuple[str, str]] = {
-    ("ethereum", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),  # USDC
-    ("arbitrum", "0xaf88d065e77c8cc2239327c5edb3a432268e5831"),  # USDC
-    ("base", "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"),  # USDC
-    ("optimism", "0x0b2c639c533813f4aa9d7837caf62653d097ff85"),  # USDC
-    ("polygon", "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359"),  # USDC
-}
-KNOWN_SAFE_TOKEN_CONTRACTS |= {
-    (chain, contract.lower())
-    for chain, contract in WETH_CONTRACTS.items()
-}
-KNOWN_SAFE_TOKEN_CONTRACTS |= {
-    (chain, info["underlying_contract"].lower())
-    for chain, tokens in STAKED_TOKENS.items()
-    for info in tokens.values()
-}
-
-
-def is_known_safe_token_contract(chain: str, contract_address: str | None) -> bool:
-    if not contract_address:
-        return False
-    return (chain, contract_address.lower()) in KNOWN_SAFE_TOKEN_CONTRACTS
-
-
-# ---------------------------------------------------------------------------
 # Transaction types
 # ---------------------------------------------------------------------------
 
@@ -186,6 +132,17 @@ def to_decimal(raw) -> Decimal:
         return Decimal("0")
 
 
+def to_decimal_strict(raw, field_name: str = "value") -> Decimal:
+    """Convert API input to Decimal, raising on malformed values."""
+    try:
+        value = Decimal(str(raw).replace(",", "").strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"invalid decimal for {field_name}: {raw!r}") from exc
+    if not value.is_finite():
+        raise ValueError(f"invalid decimal for {field_name}: {raw!r}")
+    return value
+
+
 def to_db(d: Decimal) -> str:
     """Store Decimal as TEXT for SQLite."""
     return str(d)
@@ -200,3 +157,9 @@ def format_token(d: Decimal | None, decimals: int = 6) -> str:
     formatted = f"{rounded:,.{decimals}f}"
     # Python uses comma for thousands, period for decimal — swap for Dutch
     return formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def format_eur(d: Decimal | None) -> str:
+    if d is None:
+        return "—"
+    return f"€ {format_token(d, decimals=2)}"

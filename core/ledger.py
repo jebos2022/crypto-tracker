@@ -236,6 +236,7 @@ def csv_filename(
     chain_label: str,
     asset_label: str,
     today: date | None = None,
+    year_label: str | None = None,
 ) -> str:
     day = today or date.today()
     parts = [
@@ -243,8 +244,10 @@ def csv_filename(
         _slug(wallet_label),
         _slug(chain_label),
         _slug(asset_label),
-        day.isoformat(),
     ]
+    if year_label:
+        parts.append(_slug(year_label))
+    parts.append(day.isoformat())
     return "_".join(parts) + ".csv"
 
 

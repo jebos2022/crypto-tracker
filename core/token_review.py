@@ -17,6 +17,7 @@ from core.models import (
     get_staked_info,
     is_known_safe_token_contract,
 )
+from core.token_identity import identity_contracts_by_asset
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +87,10 @@ _CANONICAL_TICKER_CONTRACTS: dict[str, dict[str, set[str]]] = {
         for chain, contract in WETH_CONTRACTS.items()
     },
 }
+for _asset, _chains in identity_contracts_by_asset().items():
+    target = _CANONICAL_TICKER_CONTRACTS.setdefault(_asset, {})
+    for _chain, _contracts in _chains.items():
+        target.setdefault(_chain, set()).update(_contracts)
 
 _KNOWN_DEX_ROUTERS: dict[str, dict[str, str]] = {
     "ethereum": {
@@ -199,8 +204,8 @@ def token_key(asset: str, contract_address: str | None) -> str:
 def token_key_sql(tx_alias: str = "t") -> str:
     return (
         f"CASE WHEN {tx_alias}.contract_address IS NOT NULL "
-        f"AND {tx_alias}.contract_address != '' "
-        f"THEN lower({tx_alias}.contract_address) "
+        f"AND trim({tx_alias}.contract_address) != '' "
+        f"THEN lower(trim({tx_alias}.contract_address)) "
         f"ELSE 'native:' || {tx_alias}.asset END"
     )
 
@@ -306,11 +311,19 @@ def classify_token(token: dict) -> TokenClassification:
     if contract is None and asset == CHAINS.get(chain, {}).get("native"):
         return TokenClassification(STATUS_SAFE, "Native chain-token", True)
 
+    staked_info = get_staked_info(chain, asset)
+    if staked_info:
+        expected = (staked_info.get("wrapper_contract") or staked_info["staking_contract"]).lower()
+        if contract and contract != expected:
+            return TokenClassification(
+                STATUS_SUSPICIOUS,
+                f"Ticker lijkt op {asset}, maar contract is niet de bekende staking-wrapper",
+                False,
+            )
+        return TokenClassification(STATUS_SAFE, "Bekende staking-wrapper", True)
+
     if is_known_safe_token_contract(chain, contract):
         return TokenClassification(STATUS_SAFE, "Bekend veilig contract", True)
-
-    if get_staked_info(chain, asset):
-        return TokenClassification(STATUS_SAFE, "Bekende staking-wrapper", True)
 
     impersonation_reason = _ticker_impersonation_reason(chain, asset, contract)
     if impersonation_reason:
@@ -580,6 +593,9 @@ def get_unique_tokens() -> list[dict]:
                 MAX(tr.review_status)        AS review_status,
                 MAX(tr.review_reason)        AS review_reason,
                 MAX(tr.decision_source)       AS decision_source,
+                MAX(tr.valuation_status)      AS valuation_status,
+                MAX(tr.valuation_effective_date) AS valuation_effective_date,
+                MAX(tr.valuation_reason)      AS valuation_reason,
                 MAX(tm.verified)             AS verified,
                 MAX(tm.holder_count)         AS holder_count,
                 MAX(tm.has_website)          AS has_website,

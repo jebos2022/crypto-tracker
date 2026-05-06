@@ -48,9 +48,8 @@ def _accepted_balances(wallet_id: int | None) -> list[dict]:
     tokens. Includes the contract_address (or NULL for native) needed for
     on-chain lookup.
 
-    NOTE: if multiple contracts share the same `asset` symbol on the same
-    chain (rare), we pick MAX(contract_address) which is deterministic but
-    arbitrary. Symbol-collision is a known limitation; see project docs.
+    Aggregates in Python to keep Decimal exact without issuing one query per
+    accepted token.
     """
     conn = get_connection()
     try:
@@ -62,8 +61,8 @@ def _accepted_balances(wallet_id: int | None) -> list[dict]:
                 t.chain                        AS chain,
                 t.asset                        AS asset,
                 {token_key_sql("t")}           AS token_key,
-                MAX(t.contract_address)        AS contract_address,
-                SUM(CAST(t.amount AS REAL))    AS rough_sum
+                t.contract_address             AS contract_address,
+                t.amount                       AS amount
             FROM transactions t
             JOIN wallets w ON w.id = t.wallet_id
             JOIN token_review tr
@@ -74,31 +73,21 @@ def _accepted_balances(wallet_id: int | None) -> list[dict]:
         if wallet_id is not None:
             sql += " AND t.wallet_id = ?"
             params.append(wallet_id)
-        sql += " GROUP BY w.id, t.chain, token_key, t.asset"
-        rough_rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(sql, params).fetchall()
 
-        # Recompute the sum exactly with Decimal — REAL is only used to GROUP.
-        result: list[dict] = []
-        for r in rough_rows:
-            tx_rows = conn.execute(
-                f"""
-                SELECT amount FROM transactions
-                WHERE wallet_id = ?
-                  AND chain = ?
-                  AND {token_key_sql("transactions")} = ?
-                """,
-                (r["wallet_id"], r["chain"], r["token_key"]),
-            ).fetchall()
-            exact = sum((Decimal(t["amount"]) for t in tx_rows), Decimal("0"))
-            result.append({
+        totals: dict[tuple, dict] = {}
+        for r in rows:
+            key = (r["wallet_id"], r["chain"], r["token_key"], r["asset"])
+            entry = totals.setdefault(key, {
                 "wallet":           r["wallet"],
                 "address":          r["address"],
                 "chain":            r["chain"],
                 "asset":            r["asset"],
-                "contract_address": r["contract_address"],
-                "computed":         exact,
+                "contract_address": (r["contract_address"] or "").lower() or None,
+                "computed":         Decimal("0"),
             })
-        return result
+            entry["computed"] += Decimal(r["amount"])
+        return list(totals.values())
     finally:
         conn.close()
 

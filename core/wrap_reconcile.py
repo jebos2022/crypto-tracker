@@ -11,9 +11,9 @@ from decimal import Decimal
 from core.models import (
     CHAINS, WETH_CONTRACTS,
     TRANSFER_IN, TRANSFER_OUT,
-    to_decimal, to_db,
+    to_decimal_strict, to_db,
 )
-from core.parsers import _address_metadata, _method_metadata, _unix_to_iso
+from core.parsers import _address_metadata, _method_metadata, _parse_block_number, _unix_to_iso
 
 
 def synthesize_wrap_rows(
@@ -50,7 +50,7 @@ def synthesize_wrap_rows(
                 continue
             if raw.get("to", "").lower() != contract_addr:
                 continue
-            value_wei = to_decimal(raw.get("value", "0"))
+            value_wei = to_decimal_strict(raw.get("value", "0"), "txlist.value")
             if value_wei <= 0:
                 continue
             h = raw.get("hash", "")
@@ -61,7 +61,7 @@ def synthesize_wrap_rows(
                 "id":               str(uuid.uuid4()),
                 "chain":            chain,
                 "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
-                "block_number":     int(raw.get("blockNumber", "0") or "0"),
+                "block_number":     _parse_block_number(raw),
                 "tx_hash":          f"{h}_wrap_{contract_addr[:6]}",
                 **_address_metadata(raw),
                 "type":             TRANSFER_IN,
@@ -87,7 +87,7 @@ def synthesize_wrap_rows(
         candidates = [
             raw for raw in txlist_rows
             if raw.get("isError", "0") != "1"
-            and to_decimal(raw.get("value", "0")) / Decimal("10") ** 18 == deficit
+            and to_decimal_strict(raw.get("value", "0"), "txlist.value") / Decimal("10") ** 18 == deficit
         ]
         if len(candidates) != 1:
             continue
@@ -97,7 +97,7 @@ def synthesize_wrap_rows(
             "id":               str(uuid.uuid4()),
             "chain":            chain,
             "timestamp":        _unix_to_iso(raw.get("timeStamp", "0")),
-            "block_number":     int(raw.get("blockNumber", "0") or "0"),
+            "block_number":     _parse_block_number(raw),
             "tx_hash":          f"{h}_wrap_amt_{contract_addr[:6]}",
             **_address_metadata(raw),
             "type":             TRANSFER_IN,

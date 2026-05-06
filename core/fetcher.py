@@ -9,24 +9,18 @@ from datetime import datetime, timezone
 
 from core import api
 from core.db import get_connection
-from core.models import (
-    CHAINS,
-    get_staked_info,
-)
+from core.fetcher_persist import insert_rows, upsert_token_meta, upsert_token_review, upsert_token_reviews
+from core.models import CHAINS
 from core.parsers import (
     _parse_tokentx_row,
     _parse_txlist_row,
     _parse_internal_row,
 )
-from core.token_review import (
-    AUTO_DECISION,
-    USER_DECISION,
-    classify_token,
-    enrich_public_sources,
-    token_key,
-    utc_now,
-)
+from core.token_review import enrich_public_sources
 from core.wrap_reconcile import synthesize_wrap_rows
+
+
+INTER_WALLET_CHAIN_DELAY = 0.15
 
 
 # ---------------------------------------------------------------------------
@@ -128,153 +122,20 @@ def _known_hashes(wallet_id: int) -> set[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 def _insert_rows(rows: list[dict], wallet_id: int) -> int:
-    """Insert rows into transactions. Returns number inserted."""
-    if not rows:
-        return 0
-    conn = get_connection()
-    try:
-        inserted = 0
-        for row in rows:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO transactions
-                  (id, wallet_id, chain, timestamp, block_number, tx_hash,
-                   from_address, to_address, type, asset, contract_address,
-                   amount, source, method_id, method_name)
-                VALUES
-                  (:id, :wallet_id, :chain, :timestamp, :block_number, :tx_hash,
-                   :from_address, :to_address, :type, :asset, :contract_address,
-                   :amount, :source, :method_id, :method_name)
-                """,
-                {
-                    **row,
-                    "wallet_id": wallet_id,
-                    "from_address": row.get("from_address"),
-                    "to_address": row.get("to_address"),
-                    "method_id": row.get("method_id"),
-                    "method_name": row.get("method_name"),
-                },
-            )
-            if conn.execute("SELECT changes()").fetchone()[0]:
-                inserted += 1
-        conn.commit()
-        return inserted
-    finally:
-        conn.close()
+    return insert_rows(rows, wallet_id, get_connection)
 
 
 def _upsert_token_review(wallet_id: int, chain: str, asset: str, contract_address: str | None) -> None:
-    """
-    Add token to review table if not already known.
-    Staked wrapper tokens (xOPN, stPEAR) are auto-accepted when their
-    underlying token (OPN, PEAR) is already accepted for this wallet+chain.
-    """
-    conn = get_connection()
-    try:
-        info = get_staked_info(chain, asset)
-        classification = classify_token({
-            "chain": chain,
-            "asset": asset,
-            "contract_address": contract_address,
-        })
-        auto_accept = 1 if classification.accepted_by_default else 0
-        if info:
-            row = conn.execute(
-                """
-                SELECT accepted FROM token_review
-                WHERE wallet_id = ?
-                  AND chain = ?
-                  AND (asset = ? OR token_key = ?)
-                """,
-                (wallet_id, chain, info["underlying"], info.get("underlying_contract", "").lower()),
-            ).fetchone()
-            if row and row["accepted"]:
-                auto_accept = 1
+    upsert_token_review(wallet_id, chain, asset, contract_address, get_connection)
 
-        key = token_key(asset, contract_address)
-        now = utc_now()
-        conn.execute(
-            """
-            INSERT INTO token_review
-                (wallet_id, chain, token_key, asset, contract_address, accepted,
-                 review_status, review_reason, decision_source, decision_updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(wallet_id, chain, token_key) DO UPDATE SET
-                asset = excluded.asset,
-                contract_address = excluded.contract_address,
-                review_status = excluded.review_status,
-                review_reason = excluded.review_reason,
-                accepted = CASE
-                    WHEN token_review.decision_source = ? THEN token_review.accepted
-                    ELSE excluded.accepted
-                END,
-                decision_source = CASE
-                    WHEN token_review.decision_source = ? THEN token_review.decision_source
-                    ELSE excluded.decision_source
-                END,
-                decision_updated_at = CASE
-                    WHEN token_review.decision_source = ? THEN token_review.decision_updated_at
-                    ELSE excluded.decision_updated_at
-                END
-            """,
-            (
-                wallet_id,
-                chain,
-                key,
-                asset,
-                contract_address.lower() if contract_address else None,
-                auto_accept,
-                classification.status,
-                classification.reason,
-                AUTO_DECISION,
-                now,
-                USER_DECISION,
-                USER_DECISION,
-                USER_DECISION,
-            ),
-        )
-        if auto_accept:
-            # Also flip existing rows that were not yet accepted.
-            conn.execute(
-                """
-                UPDATE token_review
-                SET accepted = 1, decision_source = ?, decision_updated_at = ?
-                WHERE wallet_id = ?
-                  AND chain = ?
-                  AND token_key = ?
-                  AND decision_source != ?
-                """,
-                (AUTO_DECISION, now, wallet_id, chain, key, USER_DECISION),
-            )
-        conn.commit()
-    finally:
-        conn.close()
+
+def _upsert_token_reviews(wallet_id: int, rows: list[dict]) -> None:
+    upsert_token_reviews(wallet_id, rows, get_connection)
 
 
 def _upsert_token_meta(chain: str, contract_address: str, symbol: str, decimals: int) -> None:
-    """
-    Persist per-contract decimals + symbol from raw tokentx rows. Idempotent
-    upsert — used later by balance_check to scale on-chain balances.
-    """
-    if not contract_address:
-        return
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-    conn = get_connection()
-    try:
-        conn.execute(
-            """
-            INSERT INTO token_meta (chain, contract_address, symbol, decimals, last_seen)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(chain, contract_address) DO UPDATE SET
-                symbol    = excluded.symbol,
-                decimals  = excluded.decimals,
-                last_seen = excluded.last_seen
-            """,
-            (chain, contract_address.lower(), symbol, decimals, now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    upsert_token_meta(chain, contract_address, symbol, decimals, now, get_connection)
 
 
 # ---------------------------------------------------------------------------
@@ -365,14 +226,17 @@ def fetch_wallet(wallet_id: int, address: str, chain: str) -> FetchResult:
         result.endpoint_errors["txlistinternal"] = f"{type(e).__name__}: {e}"
 
     # 4 — Native-wrap reconciliation (see core/wrap_reconcile.py)
-    for synth in synthesize_wrap_rows(buffer, txlist_rows, chain):
-        _add(synth, "txlist")
+    if "txlist" not in result.endpoint_errors:
+        try:
+            for synth in synthesize_wrap_rows(buffer, txlist_rows, chain):
+                _add(synth, "txlist")
+        except Exception as e:
+            result.endpoint_errors["txlist"] = f"{type(e).__name__}: {e}"
 
     # Persist
     result.new_tx = _insert_rows(buffer, wallet_id)
 
-    for row in buffer:
-        _upsert_token_review(wallet_id, chain, row["asset"], row.get("contract_address"))
+    _upsert_token_reviews(wallet_id, buffer)
 
     # Save incremental state — but ONLY for endpoints that completed without error.
     for endpoint, max_block in result.max_block_per_endpoint.items():
@@ -424,7 +288,7 @@ def fetch_all(
             except Exception as e:
                 summary.errors.append(f"{label} / {wallet['name']}: {e}")
 
-            time.sleep(0.15)
+            time.sleep(INTER_WALLET_CHAIN_DELAY)
 
     try:
         enrich_public_sources(

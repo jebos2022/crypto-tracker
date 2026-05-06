@@ -34,6 +34,18 @@ class LedgerHelperTests(unittest.TestCase):
             "transactions_alle-wallets_alle-chains_stpear_2026-04-30.csv",
         )
 
+    def test_csv_filename_can_include_year_filter(self) -> None:
+        self.assertEqual(
+            csv_filename(
+                "Main wallet",
+                "Ethereum",
+                "Alle tokens",
+                date(2026, 4, 30),
+                year_label="2022",
+            ),
+            "transactions_main-wallet_ethereum_alle-tokens_2022_2026-04-30.csv",
+        )
+
     def test_logical_tx_groups_keeps_one_on_chain_transaction_together(self) -> None:
         rows = [
             _row(f"{HASH}_fee", "GAS_FEE", "ETH", "-0.003", "txlist"),

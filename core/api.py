@@ -27,6 +27,13 @@ import time
 
 import httpx
 
+from core.api_public_evidence import (
+    fetch_coingecko_token_data,
+    fetch_coingecko_token_list,
+    fetch_coinmarketcap_token_info,
+    fetch_goplus_token_security,
+)
+from core.env import load_env
 from core.models import CHAINS, ROUTESCAN_CHAINS, ETHERSCAN_BASE, ROUTESCAN_BASE, PAGE_SIZE
 
 
@@ -50,15 +57,15 @@ MAX_RETRIES = 5            # rate-limit retries per request
 INITIAL_BACKOFF = 1.0      # seconds; doubles per retry (1, 2, 4, 8, 16)
 INTER_PAGE_DELAY = 0.25    # seconds between successful pages, throttle to <5 req/s
 DEFAULT_TIMEOUT = 30.0
-COINGECKO_BASE = "https://api.coingecko.com/api/v3"
-COINGECKO_TOKEN_LIST_BASE = "https://tokens.coingecko.com"
-GOPLUS_BASE = "https://api.gopluslabs.io/api/v1"
-COINMARKETCAP_BASE = "https://pro-api.coinmarketcap.com/v2"
 
 
 # ---------------------------------------------------------------------------
 # URL / param helpers
 # ---------------------------------------------------------------------------
+
+def _ensure_env_loaded() -> None:
+    load_env()
+
 
 def _api_url(chain: str) -> str:
     if chain in ROUTESCAN_CHAINS:
@@ -69,6 +76,7 @@ def _api_url(chain: str) -> str:
 
 def _api_params(chain: str) -> dict:
     """Base params injected into every request (API key + optional chainid)."""
+    _ensure_env_loaded()
     if chain in ROUTESCAN_CHAINS:
         key = os.getenv("ROUTESCAN_API_KEY", "")
         return {"apikey": key} if key else {}
@@ -76,16 +84,6 @@ def _api_params(chain: str) -> dict:
     if not key:
         raise ValueError("ETHERSCAN_API_KEY not set in .env")
     return {"chainid": CHAINS[chain]["chainid"], "apikey": key}
-
-
-def _coingecko_headers() -> dict:
-    key = os.getenv("COINGECKO_API_KEY", "").strip()
-    return {"x-cg-demo-api-key": key} if key else {}
-
-
-def _coinmarketcap_headers() -> dict:
-    key = os.getenv("COINMARKETCAP_API_KEY", "").strip()
-    return {"X-CMC_PRO_API_KEY": key} if key else {}
 
 
 # ---------------------------------------------------------------------------
@@ -134,22 +132,25 @@ def _classify(data: dict) -> tuple[str, list]:
 # Paginated fetch
 # ---------------------------------------------------------------------------
 
-def _request_with_retry(client: httpx.Client, url: str, params: dict) -> tuple[str, list]:
-    """One HTTP request, with rate-limit retries. Returns (status, batch)."""
+def _retry_loop(request_fn, classify_fn):
     backoff = INITIAL_BACKOFF
     for attempt in range(MAX_RETRIES):
-        resp = client.get(url, params=params)
+        resp = request_fn()
         resp.raise_for_status()
         data = resp.json()
         try:
-            return _classify(data)
+            return classify_fn(data)
         except EtherscanRateLimit:
             if attempt == MAX_RETRIES - 1:
                 raise
             time.sleep(backoff)
             backoff *= 2
-    # Unreachable, but keeps type-checkers happy.
     raise EtherscanRateLimit("exhausted retries")
+
+
+def _request_with_retry(client: httpx.Client, url: str, params: dict) -> tuple[str, list]:
+    """One HTTP request, with rate-limit retries. Returns (status, batch)."""
+    return _retry_loop(lambda: client.get(url, params=params), _classify)
 
 
 def _paginate(
@@ -262,74 +263,6 @@ def fetch_tokeninfo(contract_address: str, chain: str) -> dict | None:
     return result[0] if isinstance(result, list) else result
 
 
-def fetch_coingecko_token_list(asset_platform_id: str) -> dict | None:
-    """CoinGecko token list for one asset platform."""
-    url = f"{COINGECKO_TOKEN_LIST_BASE}/{asset_platform_id}/all.json"
-    with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-        resp = client.get(url)
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        return resp.json()
-
-
-def fetch_coingecko_token_data(network: str, contract_address: str) -> dict | None:
-    """CoinGecko on-chain token data by exact contract address."""
-    if not os.getenv("COINGECKO_API_KEY", "").strip():
-        return None
-    url = f"{COINGECKO_BASE}/coins/{network}/contract/{contract_address.lower()}"
-    with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-        resp = client.get(url, headers=_coingecko_headers())
-        if resp.status_code in (401, 403, 404):
-            return None
-        resp.raise_for_status()
-        return resp.json()
-
-
-def fetch_goplus_token_security(chain_id: int, contract_address: str) -> dict | None:
-    """GoPlus token security/risk data by exact contract address."""
-    url = f"{GOPLUS_BASE}/token_security/{chain_id}"
-    headers = {}
-    token = os.getenv("GOPLUS_API_TOKEN", "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-        resp = client.get(
-            url,
-            params={"contract_addresses": contract_address.lower()},
-            headers=headers,
-        )
-        if resp.status_code in (401, 403, 404):
-            return None
-        resp.raise_for_status()
-        data = resp.json()
-    result = data.get("result") or {}
-    if not isinstance(result, dict):
-        return None
-    return result.get(contract_address.lower()) or result.get(contract_address)
-
-
-def fetch_coinmarketcap_token_info(contract_address: str) -> dict | None:
-    """CoinMarketCap token metadata by exact contract address."""
-    headers = _coinmarketcap_headers()
-    if not headers:
-        return None
-    with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-        resp = client.get(
-            f"{COINMARKETCAP_BASE}/cryptocurrency/info",
-            params={"address": contract_address.lower()},
-            headers=headers,
-        )
-        if resp.status_code in (401, 403, 404):
-            return None
-        resp.raise_for_status()
-        data = resp.json()
-    payload = data.get("data") or {}
-    if isinstance(payload, dict) and payload:
-        return payload
-    return None
-
-
 def fetch_txlistinternal(address: str, chain: str, startblock: int = 0) -> list[dict]:
     """Native token movements via smart contracts (DEX returns, unstaking)."""
     return _paginate(
@@ -348,6 +281,17 @@ def fetch_txlistinternal(address: str, chain: str, startblock: int = 0) -> list[
 # Live balance lookups (single-call, no pagination)
 # ---------------------------------------------------------------------------
 
+def _classify_single_result(data: dict) -> str:
+    status = data.get("status")
+    message = data.get("message", "")
+    result = data.get("result")
+    if status == "1":
+        return str(result)
+    if _is_rate_limit(message, result):
+        raise EtherscanRateLimit(f"{message}: {result}")
+    raise EtherscanError(f"{message}: {result}")
+
+
 def _single_call(url: str, params: dict) -> str:
     """
     Issue a single balance/tokenbalance request and return the raw `result`
@@ -356,26 +300,14 @@ def _single_call(url: str, params: dict) -> str:
     return one number, not a list.
     """
     with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
-        backoff = INITIAL_BACKOFF
-        for attempt in range(MAX_RETRIES):
-            resp = client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            status  = data.get("status")
-            message = data.get("message", "")
-            result  = data.get("result")
-            if status == "1":
-                return str(result)
-            # status == "0" — Etherscan may legitimately return "0" balance
-            # with status="1", so a "0" status here means an actual problem.
-            if _is_rate_limit(message, result):
-                if attempt == MAX_RETRIES - 1:
-                    raise EtherscanRateLimit(f"{message}: {result}")
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            raise EtherscanError(f"{message}: {result}")
-    raise EtherscanRateLimit("exhausted retries")
+        return _retry_loop(lambda: client.get(url, params=params), _classify_single_result)
+
+
+def _parse_int_result(raw: str, label: str) -> int:
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError) as exc:
+        raise EtherscanError(f"non-numeric {label} result: {raw!r}") from exc
 
 
 def fetch_native_balance(address: str, chain: str) -> int:
@@ -391,7 +323,7 @@ def fetch_native_balance(address: str, chain: str) -> int:
         "address": address.lower(),
         "tag":     "latest",
     }
-    return int(_single_call(url, params))
+    return _parse_int_result(_single_call(url, params), "balance")
 
 
 def fetch_token_balance(address: str, contract_address: str, chain: str) -> int:
@@ -408,7 +340,7 @@ def fetch_token_balance(address: str, contract_address: str, chain: str) -> int:
         "address":         address.lower(),
         "tag":             "latest",
     }
-    return int(_single_call(url, params))
+    return _parse_int_result(_single_call(url, params), "tokenbalance")
 
 
 def fetch_token_supply(contract_address: str, chain: str) -> int:
@@ -420,4 +352,4 @@ def fetch_token_supply(contract_address: str, chain: str) -> int:
         "action":          "tokensupply",
         "contractaddress": contract_address.lower(),
     }
-    return int(_single_call(url, params))
+    return _parse_int_result(_single_call(url, params), "tokensupply")
